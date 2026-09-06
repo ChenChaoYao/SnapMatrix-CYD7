@@ -1277,7 +1277,7 @@ void setup() {
                       "<h2>SnapMatrix 控制面板 <span style='font-size:15px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;padding:3px 10px;border-radius:20px;font-weight:700;margin-left:auto;'>v1.0 正式版</span></h2>"
                       "<div class='status'>"
                       "<div class='status-row'><span>裝置 IP: " + WiFi.localIP().toString() + "</span><span id='conn-status'>狀態: " + (pState.is_connected ? "已連線" : "未連線") + "</span></div>"
-                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.0 (正式上市版)</span></div>"
+                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.0</span></div>"
                       "<div class='status-row'><span style='color:#a78bfa;'>🖨️ 印表機 ROM:</span><span id='rom-text' style='font-weight:600;color:#fff;'>" + rom_info + "</span></div>"
                       "<div class='status-row'><span style='color:#38bdf8;'>⛅ 當前天氣:</span><span>" + weather_status + "</span></div>"
                       "</div>"
