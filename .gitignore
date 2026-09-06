@@ -1,0 +1,17 @@
+# PlatformIO generated files
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Editor / IDE files
+.vscode/
+.antigravity/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled binaries
+*.bin
+*.elf
+*.hex
