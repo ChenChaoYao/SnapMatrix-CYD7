@@ -69,7 +69,7 @@
 #### 2. 下載與編譯
 ```bash
 # 複製專案
-git clone https://github.com/YOUR_USERNAME/SnapMatrix-CYD7.git
+git clone https://github.com/ChenChaoYao/SnapMatrix-CYD7.git
 cd SnapMatrix-CYD7
 
 # 編譯並燒錄韌體
@@ -159,7 +159,7 @@ By connecting directly to **Moonraker / Klipper** (supporting Snapmaker and all 
 #### 2. Build & Flash
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/SnapMatrix-CYD7.git
+git clone https://github.com/ChenChaoYao/SnapMatrix-CYD7.git
 cd SnapMatrix-CYD7
 
 # Build and flash firmware
