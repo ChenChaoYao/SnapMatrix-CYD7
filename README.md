@@ -14,6 +14,23 @@
 
 ---
 
+### 🎬 實機運作展示 (Live Demo)
+
+<p align="center">
+  <img src="docs/demo_preview.gif" alt="SnapMatrix CYD7 實機運行展示" width="620">
+</p>
+
+#### 📺 實機展示影片
+- **完整操作與虛擬點陣動態展示 (38 秒)**：  
+  https://github.com/ChenChaoYao/SnapMatrix-CYD7/raw/main/docs/VID_20260901_230604.mp4  
+  *(備用連結：[點此直接開啟 / 下載 MP4 影片](docs/VID_20260901_230604.mp4))*
+
+- **畫面切換與過渡動態展示 (短片)**：  
+  https://github.com/ChenChaoYao/SnapMatrix-CYD7/raw/main/docs/VID_20260901_230657.mp4  
+  *(備用連結：[點此直接開啟 / 下載 MP4 影片](docs/VID_20260901_230657.mp4))*
+
+---
+
 ### ✨ 核心特色
 
 1. **🎨 32x8 虛擬像素 LED 點陣引擎**
@@ -113,6 +130,23 @@ pio device monitor
 **SnapMatrix-CYD7** is a smart 3D printer telemetry dashboard and virtual LED matrix display built specifically for the **Sunton / CYD ESP32-8048S070 (7.0" 800x480 RGB LCD with GT911 Capacitive Touch)**.
 
 By connecting directly to **Moonraker / Klipper** (supporting Snapmaker and all standard Klipper-powered 3D printers) via low-latency WebSockets, it visualizes real-time print telemetry, nozzle/bed temperatures, progress, ETA, fan speeds, and dynamic 32x8 pixel-art LED animations on a sleek sci-fi dashboard.
+
+---
+
+### 🎬 Live Demo
+
+<p align="center">
+  <img src="docs/demo_preview.gif" alt="SnapMatrix CYD7 Live Demo Preview" width="620">
+</p>
+
+#### 📺 Video Walkthroughs
+- **Full Operational & Virtual Matrix Demo (38s)**:  
+  https://github.com/ChenChaoYao/SnapMatrix-CYD7/raw/main/docs/VID_20260901_230604.mp4  
+  *(Direct link: [Watch / Download MP4](docs/VID_20260901_230604.mp4))*
+
+- **UI Transition & Touch Response Demo**:  
+  https://github.com/ChenChaoYao/SnapMatrix-CYD7/raw/main/docs/VID_20260901_230657.mp4  
+  *(Direct link: [Watch / Download MP4](docs/VID_20260901_230657.mp4))*
 
 ---
 
