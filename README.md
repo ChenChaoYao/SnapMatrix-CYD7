@@ -45,6 +45,18 @@
    - 內建 Glassmorphism 毛玻璃質感的 Web 管理介面（Port 80）。
    - 支援 **ElegantOTA** 瀏覽器無線韌體更新（`/update`），無需插線即可空中升級。
 
+### 🖥️ Web 控制面板介面 (Web UI)
+
+裝置連上區域網路後，在瀏覽器輸入裝置的 IP 位址（例如 `http://192.168.1.150`），即可進入深色毛玻璃質感的控制面板：
+
+<p align="center">
+  <img src="docs/web_ui_dashboard.svg" alt="SnapMatrix Web Dashboard UI" width="520">
+</p>
+
+- **即時狀態看板**：即時顯示目前裝置 IP、印表機連線狀態、韌體版本、自動辨識之印表機型號與 ROM 版本、當前氣溫與天氣狀況。
+- **動態參數設定**：可線上即時變更 Moonraker IP 位址與螢幕自動休眠時間，點擊儲存即可熱套用重新連線。
+- **OTA 無線韌體更新**：點擊「開啟 OTA 韌體無線更新」可進入 `/update` 頁面，免插傳輸線即可直接瀏覽器空中升級。
+
 ---
 
 ### 🛠️ 硬體規格
@@ -134,6 +146,18 @@ By connecting directly to **Moonraker / Klipper** (supporting Snapmaker and all 
    - **WiFiManager Captive Portal** (`SnapMatrix-CYD7-Setup`) for zero-code initial Wi-Fi & Printer IP configuration.
    - Dark-themed Glassmorphism web management dashboard (Port 80).
    - Integrated **ElegantOTA** wireless firmware update portal (`/update`).
+
+### 🖥️ Web Management Dashboard (Web UI)
+
+Once connected to your local network, navigate to the device's IP address (e.g., `http://192.168.1.150`) in any browser to access the modern Glassmorphism control panel:
+
+<p align="center">
+  <img src="docs/web_ui_dashboard.svg" alt="SnapMatrix Web Dashboard UI" width="520">
+</p>
+
+- **Real-time Telemetry Banner**: Live display of device IP, printer connection status, firmware version, printer model/ROM auto-detected via Moonraker, and current Open-Meteo weather.
+- **Dynamic Configuration**: Adjust Moonraker IP and screen standby timeout on the fly without reflashing.
+- **OTA Firmware Updates**: Direct link to `/update` for seamless over-the-air firmware updates via browser.
 
 ---
 
