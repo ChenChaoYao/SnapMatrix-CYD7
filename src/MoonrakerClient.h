@@ -47,6 +47,12 @@ struct PrinterState {
     int metadata_estimated_time = 0;
     bool is_connected = false;
 
+    // Ideaformer & Standard Klipper extras
+    String filament_name = "";
+    float filament_used_m = 0.0f;
+    int host_temper = 0;
+    int estimated_total_layers = 0;
+
     // Motion & Extrusion Factors
     float extrude_factor = 1.0f;
     float speed_factor = 1.0f;
@@ -92,14 +98,42 @@ public:
         ws.enableHeartbeat(15000, 3000, 2);
     }
 
+    String printer_profile = "snapmaker_u1"; // "snapmaker_u1" or "ideaformer_ir3"
+    bool pending_metadata_fetch = false;
     unsigned long last_sysinfo_fetch = 0;
+    unsigned long last_ptc_fetch = 0;
+
+    void setPrinterProfile(const String& profile) {
+        printer_profile = profile;
+        if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50))) {
+            if (printer_profile == "ideaformer_ir3") {
+                state.machine_model = "Ideaformer IR3 V2";
+            } else {
+                state.machine_model = "Snapmaker U1";
+            }
+            xSemaphoreGive(mutex);
+        }
+        if (state.is_connected) {
+            sendSubscriptions();
+            fetchSystemInfo();
+            if (state.gcode_file.length() > 0) {
+                fetchMetadata(state.gcode_file);
+            }
+        }
+    }
 
     void loop() {
         ws.loop();
         if (state.is_connected) {
-            if (last_ptc_fetch == 0 || millis() - last_ptc_fetch >= 30000UL) {
-                last_ptc_fetch = millis();
-                fetchPrintTaskConfig();
+            if (pending_metadata_fetch && state.gcode_file.length() > 0) {
+                pending_metadata_fetch = false;
+                fetchMetadata(state.gcode_file);
+            }
+            if (printer_profile == "snapmaker_u1") {
+                if (last_ptc_fetch == 0 || millis() - last_ptc_fetch >= 30000UL) {
+                    last_ptc_fetch = millis();
+                    fetchPrintTaskConfig();
+                }
             }
             unsigned long sysinfo_interval = (state.rom_version.length() == 0) ? 5000UL : 60000UL;
             if (last_sysinfo_fetch == 0 || millis() - last_sysinfo_fetch >= sysinfo_interval) {
@@ -129,20 +163,28 @@ public:
             xSemaphoreGive(mutex);
         }
     }
-    void sendSubscriptions() {
-        // Query & Subscribe request (subscribe to specific fields for bed_mesh to avoid huge 15KB+ mesh data)
-        String subMsg = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{"
-                        "\"print_stats\":null,\"display_status\":null,\"toolhead\":null,\"gcode_move\":[\"extrude_factor\",\"speed_factor\"],"
-                        "\"extruder\":null,\"extruder1\":null,\"extruder2\":null,\"extruder3\":null,"
-                        "\"heater_bed\":null,\"temperature_sensor cavity\":null,\"virtual_sdcard\":null,"
-                        "\"print_task_config\":null,\"probe\":[\"status\"],\"auto_screws_tilt_adjust\":[\"probe_step\",\"current_point\"],"
-                        "\"machine_state_manager\":[\"action_code\",\"main_state\"],"
-                        "\"filament_feed left\":null,\"filament_feed right\":null,\"bed_mesh\":[\"progress\"]}},\"id\":2}";
-        ws.sendTXT(subMsg);
-        Serial.printf("[Moonraker] Sent subscription request to %s:%d\n", printer_ip.c_str(), printer_port);
-    }
 
-    unsigned long last_ptc_fetch = 0;
+    void sendSubscriptions() {
+        String subMsg;
+        if (printer_profile == "ideaformer_ir3") {
+            // Ideaformer IR3 V2 (Standard Klipper / Conveyor Belt single extruder profile)
+            subMsg = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{"
+                     "\"print_stats\":null,\"display_status\":null,\"toolhead\":null,\"gcode_move\":[\"extrude_factor\",\"speed_factor\"],"
+                     "\"extruder\":null,\"heater_bed\":null,\"virtual_sdcard\":null,"
+                     "\"temperature_sensor IR3_HOST\":null,\"temperature_sensor IR3_MCU\":null,\"bed_mesh\":[\"progress\"]}},\"id\":2}";
+        } else {
+            // Standard Snapmaker U1 full subscription (4 extruders, cavity, tilt adjust, filament feeds)
+            subMsg = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{"
+                     "\"print_stats\":null,\"display_status\":null,\"toolhead\":null,\"gcode_move\":[\"extrude_factor\",\"speed_factor\"],"
+                     "\"extruder\":null,\"extruder1\":null,\"extruder2\":null,\"extruder3\":null,"
+                     "\"heater_bed\":null,\"temperature_sensor cavity\":null,\"virtual_sdcard\":null,"
+                     "\"print_task_config\":null,\"probe\":[\"status\"],\"auto_screws_tilt_adjust\":[\"probe_step\",\"current_point\"],"
+                     "\"machine_state_manager\":[\"action_code\",\"main_state\"],"
+                     "\"filament_feed left\":null,\"filament_feed right\":null,\"bed_mesh\":[\"progress\"]}},\"id\":2}";
+        }
+        ws.sendTXT(subMsg);
+        Serial.printf("[Moonraker] Sent subscription to %s:%d (Profile: %s)\n", printer_ip.c_str(), printer_port, printer_profile.c_str());
+    }
 
     void fetchPrintTaskConfig() {
         if (printer_ip.length() == 0) return;
@@ -198,8 +240,57 @@ public:
         http.end();
     }
 
+    static String urlEncode(const String& str) {
+        String encoded = "";
+        char c;
+        for (size_t i = 0; i < str.length(); i++) {
+            c = str.charAt(i);
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                encoded += c;
+            } else {
+                char code0 = "0123456789ABCDEF"[((uint8_t)c >> 4) & 0x0F];
+                char code1 = "0123456789ABCDEF"[(uint8_t)c & 0x0F];
+                encoded += '%';
+                encoded += code0;
+                encoded += code1;
+            }
+        }
+        return encoded;
+    }
+
     void fetchSystemInfo() {
         if (printer_ip.length() == 0) return;
+
+        if (printer_profile == "ideaformer_ir3") {
+            // Ideaformer IR3 V2 (Standard Klipper / Moonraker endpoint)
+            HTTPClient http;
+            String url = "http://" + printer_ip + ":" + String(printer_port) + "/printer/info";
+            http.begin(url);
+            http.setTimeout(2500);
+            int httpCode = http.GET();
+            if (httpCode == HTTP_CODE_OK) {
+                String payload = http.getString();
+                DynamicJsonDocument doc(4096);
+                if (!deserializeJson(doc, payload)) {
+                    if (doc.containsKey("result")) {
+                        JsonObject res = doc["result"];
+                        if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100))) {
+                            state.machine_model = "Ideaformer IR3 V2";
+                            if (res.containsKey("software_version")) {
+                                String ver = res["software_version"].as<String>();
+                                int dash = ver.indexOf('-');
+                                state.rom_version = (dash > 0) ? ver.substring(0, dash) : ver;
+                            }
+                            xSemaphoreGive(mutex);
+                        }
+                    }
+                }
+            }
+            http.end();
+            return;
+        }
+
+        // Snapmaker U1
         HTTPClient http;
         String url = "http://" + printer_ip + ":" + String(printer_port) + "/machine/system_info";
         http.begin(url);
@@ -250,23 +341,44 @@ public:
             httpFallback.end();
         }
     }
-
 private:
     void fetchMetadata(const String& filename) {
         if (filename.length() == 0) return;
         HTTPClient http;
-        String url = "http://" + printer_ip + ":" + String(printer_port) + "/server/files/metadata?filename=" + filename;
+        String url = "http://" + printer_ip + ":" + String(printer_port) + "/server/files/metadata?filename=" + urlEncode(filename);
         http.begin(url);
-        http.setTimeout(2000);
+        http.setTimeout(2500);
         int httpCode = http.GET();
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
-            DynamicJsonDocument doc(4096);
+            DynamicJsonDocument doc(8192);
             if (!deserializeJson(doc, payload)) {
-                if (doc.containsKey("result") && doc["result"].containsKey("estimated_time")) {
+                if (doc.containsKey("result")) {
+                    JsonObject res = doc["result"];
                     if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100))) {
-                        state.metadata_estimated_time = doc["result"]["estimated_time"].as<int>();
+                        if (res.containsKey("estimated_time")) {
+                            state.metadata_estimated_time = res["estimated_time"].as<int>();
+                        }
+                        if (res.containsKey("filament_name")) {
+                            state.filament_name = res["filament_name"].as<String>();
+                        }
+                        // Layer count calculation
+                        if (res.containsKey("layer_count") && !res["layer_count"].isNull()) {
+                            state.estimated_total_layers = res["layer_count"].as<int>();
+                        } else if (res.containsKey("object_height") && res.containsKey("layer_height")) {
+                            float objH = res["object_height"].as<float>();
+                            float layerH = res["layer_height"].as<float>();
+                            float firstLayerH = res.containsKey("first_layer_height") ? res["first_layer_height"].as<float>() : layerH;
+                            if (objH > 0 && layerH > 0) {
+                                state.estimated_total_layers = (int)round((objH - firstLayerH) / layerH) + 1;
+                            }
+                        }
+                        if (state.total_layer_num == 0 && state.estimated_total_layers > 0) {
+                            state.total_layer_num = state.estimated_total_layers;
+                        }
                         xSemaphoreGive(mutex);
+                        Serial.printf("[Moonraker] Metadata parsed: EstTime=%ds, Filament=%s, EstLayers=%d\n",
+                                      state.metadata_estimated_time, state.filament_name.c_str(), state.estimated_total_layers);
                     }
                 }
             }
@@ -294,8 +406,9 @@ private:
                     xSemaphoreGive(mutex);
                 }
                 sendSubscriptions();
-                fetchPrintTaskConfig();
+                if (printer_profile == "snapmaker_u1") fetchPrintTaskConfig();
                 fetchSystemInfo();
+                if (state.gcode_file.length() > 0) fetchMetadata(state.gcode_file);
                 break;
             case WStype_TEXT:
                 {
@@ -333,8 +446,15 @@ private:
                     state.v_sd_progress = 0.0f;
                     state.has_display_progress = false;
                     state.mc_percent = 0;
-                    // Fetch metadata in separate task or next loop
+                    state.metadata_estimated_time = 0;
+                    state.estimated_total_layers = 0;
+                    pending_metadata_fetch = true;
+                } else if (state.metadata_estimated_time == 0 && state.gcode_file.length() > 0) {
+                    pending_metadata_fetch = true;
                 }
+            }
+            if (ps.containsKey("filament_used") && !ps["filament_used"].isNull()) {
+                state.filament_used_m = ps["filament_used"].as<float>() / 1000.0f;
             }
             if (ps.containsKey("print_duration")) {
                 state.raw_print_duration = ps["print_duration"].as<int>();
@@ -367,8 +487,20 @@ private:
             }
             if (ps.containsKey("info")) {
                 JsonObject info = ps["info"];
-                if (info.containsKey("current_layer")) state.layer_num = info["current_layer"].as<int>();
-                if (info.containsKey("total_layer")) state.total_layer_num = info["total_layer"].as<int>();
+                if (info.containsKey("current_layer") && !info["current_layer"].isNull()) {
+                    state.layer_num = info["current_layer"].as<int>();
+                }
+                if (info.containsKey("total_layer") && !info["total_layer"].isNull()) {
+                    state.total_layer_num = info["total_layer"].as<int>();
+                }
+            }
+            // Fallback for estimated layers if total_layer is 0 or null
+            if (state.total_layer_num == 0 && state.estimated_total_layers > 0) {
+                state.total_layer_num = state.estimated_total_layers;
+            }
+            if (state.layer_num == 0 && state.total_layer_num > 0 && (state.raw_gcode_state == "RUNNING" || state.raw_gcode_state == "PAUSE")) {
+                state.layer_num = (int)round((state.mc_percent / 100.0f) * state.total_layer_num);
+                if (state.layer_num < 1 && state.mc_percent > 0) state.layer_num = 1;
             }
             if (ps.containsKey("message")) {
                 String msg = ps["message"].as<String>();
@@ -469,6 +601,17 @@ private:
         if (status.containsKey("temperature_sensor cavity")) {
             JsonObject ct = status["temperature_sensor cavity"];
             if (ct.containsKey("temperature")) state.chamber_temper = round(ct["temperature"].as<float>());
+        }
+
+        if (status.containsKey("temperature_sensor IR3_HOST")) {
+            JsonObject th = status["temperature_sensor IR3_HOST"];
+            if (th.containsKey("temperature")) state.host_temper = round(th["temperature"].as<float>());
+        } else if (status.containsKey("temperature_host IR3_HOST")) {
+            JsonObject th = status["temperature_host IR3_HOST"];
+            if (th.containsKey("temperature")) state.host_temper = round(th["temperature"].as<float>());
+        } else if (status.containsKey("temperature_sensor IR3_MCU")) {
+            JsonObject tm = status["temperature_sensor IR3_MCU"];
+            if (tm.containsKey("temperature")) state.host_temper = round(tm["temperature"].as<float>());
         }
 
         if (status.containsKey("probe")) {

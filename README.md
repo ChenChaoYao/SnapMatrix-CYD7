@@ -71,21 +71,28 @@
 </p>
 
 - **即時狀態看板**：即時顯示目前裝置 IP、印表機連線狀態、韌體版本、自動辨識之印表機型號與 ROM 版本、當前氣溫與天氣狀況。
-- **動態參數設定**：可線上即時變更 Moonraker IP 位址與螢幕自動休眠時間，點擊儲存即可熱套用重新連線。
+- **支援印表機機型 (Profile)**：
+  - **Snapmaker U1**：完整支援 4 耗材槽（T1~T4 色塊狀態、載入/卸載）、腔溫監測、熱床調平點進度（Bed Mesh）、印表機狀態代碼。
+  - **Ideaformer IR3 V2**：專為傳送帶（Belt）印表機與標準 Klipper 定製，自動從 Metadata 計算總層數與進度（告別 0/0）、即時主機溫度、速度與流量倍率，以及單耗材名稱與累計使用米數。
+- **動態參數設定**：可線上即時切換印表機機型 Profile、變更 Moonraker IP 位址與螢幕自動休眠時間，點擊儲存即可熱套用重新連線。
 - **OTA 無線韌體更新**：點擊「開啟 OTA 韌體無線更新」可進入 `/update` 頁面，免插傳輸線即可直接瀏覽器空中升級。
 
 ---
 
-### 🛠️ 硬體規格
+### 🛠️ 支援硬體規格
 
-| 項目 | 規格 |
-| :--- | :--- |
-| **主控晶片** | ESP32-S3-WROOM-1 (Dual-Core 240MHz) |
-| **螢幕規格** | 7.0 吋 800×480 16-bit RGB 介面 LCD |
-| **觸控面板** | GT911 I2C 電容式觸控 |
-| **記憶體** | 16MB Flash (QIO) + 8MB PSRAM (OPI) |
-| **顯示驅動庫** | [LovyanGFX](https://github.com/lovyan03/LovyanGFX) (硬體 RGB DMA 加速) |
-| **通訊協議** | WebSocket, HTTP REST, NTP (UDP) |
+本專案原生支援 **Sunton / CYD (Cheap Yellow Display)** 兩款主流 800×480 RGB 觸控螢幕開發板，UI 佈局與像素比例 100% 完美共用：
+
+| 項目 | 7.0 吋版本 (預設) | 5.0 吋版本 |
+| :--- | :--- | :--- |
+| **開發板型號** | **ESP32-8048S070** | **ESP32-8048S050** |
+| **PlatformIO 環境** | `esp32-s3-cyd7` | `esp32-s3-cyd5` |
+| **主控晶片** | ESP32-S3-WROOM-1 (Dual-Core 240MHz) | ESP32-S3-WROOM-1 (Dual-Core 240MHz) |
+| **螢幕解析度** | 7.0 吋 800×480 16-bit RGB 介面 LCD | 5.0 吋 800×480 16-bit RGB 介面 LCD |
+| **觸控面板** | GT911 I2C 電容式觸控 | GT911 I2C 電容式觸控 |
+| **記憶體配置** | 16MB Flash (QIO) + 8MB PSRAM (OPI) | 16MB Flash (QIO) + 8MB PSRAM (OPI) |
+| **顯示驅動庫** | [LovyanGFX](https://github.com/lovyan03/LovyanGFX) (硬體 RGB DMA 加速) | [LovyanGFX](https://github.com/lovyan03/LovyanGFX) (硬體 RGB DMA 加速) |
+| **通訊協議** | WebSocket, HTTP REST, NTP (UDP) | WebSocket, HTTP REST, NTP (UDP) |
 
 ---
 
@@ -101,8 +108,15 @@
 git clone https://github.com/ChenChaoYao/SnapMatrix-CYD7.git
 cd SnapMatrix-CYD7
 
-# 編譯並燒錄韌體
-pio run --target upload
+# 依您的硬體型號選擇編譯與燒錄（預設已配置為 OTA 無線燒錄至 192.168.200.104）：
+# ─── 5.0 吋 (ESP32-8048S050) 無線 OTA 燒錄 ───
+pio run -e esp32-s3-cyd5 --target upload
+
+# ─── 7.0 吋 (ESP32-8048S070) 無線 OTA 燒錄 ───
+pio run -e esp32-s3-cyd7 --target upload
+
+# ─── 備用：有線 USB 傳輸線燒錄 ───
+pio run -e esp32-s3-cyd5-usb --target upload
 
 # 開啟 Serial 監控視窗 (115200 baud)
 pio device monitor

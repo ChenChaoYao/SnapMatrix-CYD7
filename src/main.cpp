@@ -20,6 +20,7 @@ Preferences preferences;
 
 // Configuration
 String printer_ip = "192.168.1.100";
+String printer_model = "snapmaker_u1"; // "snapmaker_u1" or "ideaformer_ir3"
 String display_text = "CONNECTING TO WI-FI...";
 String current_display_state = "IDLE";
 int x_pos = MATRIX_WIDTH;
@@ -183,9 +184,10 @@ void drawPrintingIcon(int center_x) {
     uint16_t layer_col = matrix.Color(0, 230, 255);
     uint16_t fresh_col = matrix.Color(100, 255, 100);
 
-    // Moving nozzle head X: oscillates gently between center_x-2 and center_x+2
-    int phase = (millis() / 250) % 6;
-    int nx = (phase <= 3) ? (center_x - 2 + phase) : (center_x + 4 - phase);
+    // Moving nozzle head X: oscillates smoothly between center_x-2 and center_x+2 (8-step smooth cycle)
+    int phase = (millis() / 200) % 8;
+    int offset = (phase <= 4) ? (phase - 2) : (6 - phase); // -2, -1, 0, 1, 2, 1, 0, -1
+    int nx = center_x + offset;
 
     // Printhead block
     matrix.drawLine(nx - 1, 0, nx + 1, 0, head_col);
@@ -609,7 +611,7 @@ void drawDashboardStatic() {
     lcd.setTextPadding(0);
     lcd.setTextColor(TFT_CYAN, header_bg);
     lcd.setCursor(20, 16);
-    lcd.print("SnapMatrix 智慧面板 v1.0");
+    lcd.print("SnapMatrix 智慧面板 v1.1");
 
     // BOTTOM METRICS CARDS (Y=280 to 460)
     int cardY = 280;
@@ -618,29 +620,35 @@ void drawDashboardStatic() {
     // Card 1: Status & Progress (X=16, W=240)
     lcd.fillRoundRect(16, cardY, 240, cardH, 12, card_bg);
     lcd.drawRoundRect(16, cardY, 240, cardH, 12, card_border);
-    lcd.setFont(&fonts::efontTW_16);
+    lcd.drawLine(24, cardY + 38, 248, cardY + 38, card_border);
+    lcd.setFont(&fonts::efontTW_24_b);
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_WHITE, card_bg);
-    lcd.setCursor(30, cardY + 15);
+    lcd.setTextPadding(0);
+    lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+    lcd.setCursor(28, cardY + 10);
     lcd.print("列印進度");
 
     // Card 2: Temperatures (X=272, W=240)
     lcd.fillRoundRect(272, cardY, 240, cardH, 12, card_bg);
     lcd.drawRoundRect(272, cardY, 240, cardH, 12, card_border);
-    lcd.setFont(&fonts::efontTW_16);
+    lcd.drawLine(280, cardY + 38, 504, cardY + 38, card_border);
+    lcd.setFont(&fonts::efontTW_24_b);
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_WHITE, card_bg);
-    lcd.setCursor(286, cardY + 15);
+    lcd.setTextPadding(0);
+    lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+    lcd.setCursor(284, cardY + 10);
     lcd.print("溫度監控");
 
     // Card 3: Print Job & Extruders (X=528, W=256)
     lcd.fillRoundRect(528, cardY, 256, cardH, 12, card_bg);
     lcd.drawRoundRect(528, cardY, 256, cardH, 12, card_border);
-    lcd.setFont(&fonts::efontTW_16);
+    lcd.drawLine(536, cardY + 38, 776, cardY + 38, card_border);
+    lcd.setFont(&fonts::efontTW_24_b);
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_WHITE, card_bg);
-    lcd.setCursor(542, cardY + 15);
-    lcd.print("任務與層數");
+    lcd.setTextPadding(0);
+    lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+    lcd.setCursor(540, cardY + 10);
+    lcd.print(printer_model == "ideaformer_ir3" ? "任務與進度" : "任務與層數");
 
     // Initial Matrix Render
     matrix.renderToLGFX(&lcd, 16, 65, 24, 9, true);
@@ -926,6 +934,7 @@ void renderDashboardUI(const PrinterState& pState) {
         lcd.setTextColor(TFT_LIGHTGRAY, header_bg);
         lcd.setCursor(485, 16);
         lcd.printf("本機: %s", last_device_ip.c_str());
+        lcd.setTextPadding(0);
     }
 
     // Serial Logging (Throttled every 3 seconds)
@@ -943,29 +952,47 @@ void renderDashboardUI(const PrinterState& pState) {
     }
 
     // CARD 1: Progress & Status
+    if (first_run) {
+        lcd.setFont(&fonts::efontTW_24_b);
+        lcd.setTextSize(1);
+        lcd.setTextPadding(0);
+        lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+        lcd.setCursor(28, cardY + 10);
+        lcd.print("列印進度");
+    }
+
+    // Row 1: Print Progress Percentage (Right-aligned, vivid yellow)
     if (first_run || pState.mc_percent != last_mc_percent) {
         last_mc_percent = pState.mc_percent;
-        lcd.fillRect(25, cardY + 40, 220, 38, card_bg);
-        lcd.setFont(&fonts::Font0);
-        lcd.setTextSize(4);
-        lcd.setTextPadding(0);
-        lcd.setTextColor(TFT_CYAN, card_bg);
-        lcd.setCursor(30, cardY + 45);
-        lcd.printf("%d%%", last_mc_percent);
+        lcd.fillRect(25, cardY + 39, 222, 35, card_bg);
+        lcd.setFont(&fonts::FreeSansBold24pt7b);
         lcd.setTextSize(1);
+        lcd.setTextPadding(0);
+        lcd.setTextDatum(textdatum_t::middle_right);
+        lcd.setTextColor(lcd.color565(255, 235, 0), card_bg); // 鮮豔明亮高飽和黃色
+        lcd.drawString(String(last_mc_percent) + "%", 244, cardY + 51);
+        lcd.setTextDatum(textdatum_t::top_left);
     }
 
+    // Row 2: 狀態 (At original position cardY + 76)
     if (first_run || pState.gcode_state != last_gcode_state) {
         last_gcode_state = pState.gcode_state;
-        lcd.fillRect(25, cardY + 80, 220, 26, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(25, cardY + 74, 220, 28, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(TFT_LIGHTGRAY, card_bg);
-        lcd.setCursor(30, cardY + 85);
-        lcd.printf("狀態: %s", get_status_chinese(last_gcode_state).c_str());
+        lcd.setCursor(28, cardY + 76);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        lcd.print("狀態: ");
+        uint16_t stat_col = TFT_GREEN;
+        if (last_gcode_state == "PAUSE") stat_col = TFT_ORANGE;
+        else if (last_gcode_state == "FAILED") stat_col = TFT_RED;
+        else if (last_gcode_state == "RUNNING") stat_col = TFT_CYAN;
+        lcd.setTextColor(stat_col, card_bg);
+        lcd.print(get_status_chinese(last_gcode_state));
     }
 
+    // Row 3: 剩餘 / 天氣 (At original position cardY + 108)
     static bool last_weather_valid = false;
     static int last_weather_code = -1;
     static int last_weather_temp = -999;
@@ -975,28 +1002,33 @@ void renderDashboardUI(const PrinterState& pState) {
         last_weather_valid = weatherService.data.valid;
         last_weather_code = weatherService.data.code;
         last_weather_temp = (int)weatherService.data.temp;
-        lcd.fillRect(25, cardY + 108, 220, 26, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(25, cardY + 106, 220, 28, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(TFT_LIGHTGRAY, card_bg);
-        lcd.setCursor(30, cardY + 112);
+        lcd.setCursor(28, cardY + 108);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
         if (pState.gcode_state == "IDLE" && weatherService.data.valid) {
-            lcd.printf("天氣: %s %d°C %s", weatherService.data.city.c_str(), (int)round(weatherService.data.temp), weatherService.data.desc_cn.c_str());
+            lcd.print("天氣: ");
+            lcd.setTextColor(TFT_WHITE, card_bg);
+            lcd.printf("%s %d°C", weatherService.data.city.c_str(), (int)round(weatherService.data.temp));
         } else {
-            lcd.printf("剩餘: %s", last_remaining_time >= 0 ? (format_time(last_remaining_time)).c_str() : "--");
+            lcd.print("剩餘: ");
+            lcd.setTextColor(TFT_WHITE, card_bg);
+            lcd.print(last_remaining_time >= 0 ? format_time(last_remaining_time) : "--");
         }
     }
 
-    String cur_ota_url = "OTA: http://" + cur_device_ip + "/update";
+    // Row 4: OTA (At original position cardY + 142)
+    String cur_ota_url = "OTA: " + cur_device_ip;
     if (first_run || cur_ota_url != last_ota_url) {
         last_ota_url = cur_ota_url;
-        lcd.fillRect(25, cardY + 140, 220, 22, card_bg);
-        lcd.setFont(&fonts::Font0);
+        lcd.fillRect(25, cardY + 138, 220, 24, card_bg);
+        lcd.setFont(&fonts::efontTW_16);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(lcd.color565(130, 150, 180), card_bg);
-        lcd.setCursor(30, cardY + 145);
+        lcd.setTextColor(lcd.color565(120, 145, 175), card_bg);
+        lcd.setCursor(28, cardY + 142);
         lcd.print(last_ota_url);
     }
 
@@ -1004,103 +1036,170 @@ void renderDashboardUI(const PrinterState& pState) {
     if (first_run || pState.nozzle_temper != last_nozzle_temper || pState.nozzle_target_temper != last_nozzle_target) {
         last_nozzle_temper = pState.nozzle_temper;
         last_nozzle_target = pState.nozzle_target_temper;
-        lcd.fillRect(280, cardY + 45, 220, 28, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(280, cardY + 46, 225, 30, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(lcd.color565(255, 100, 100), card_bg);
-        lcd.setCursor(286, cardY + 50);
-        lcd.printf("噴頭: %d / %d °C", last_nozzle_temper, last_nozzle_target);
+        lcd.setCursor(284, cardY + 48);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        lcd.print("噴頭: ");
+        lcd.setTextColor(lcd.color565(255, 120, 120), card_bg);
+        lcd.printf("%d / %d °C", last_nozzle_temper, last_nozzle_target);
     }
 
     if (first_run || pState.bed_temper != last_bed_temper || pState.bed_target_temper != last_bed_target) {
         last_bed_temper = pState.bed_temper;
         last_bed_target = pState.bed_target_temper;
-        lcd.fillRect(280, cardY + 80, 220, 28, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(280, cardY + 83, 225, 30, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
+        lcd.setCursor(284, cardY + 85);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        lcd.print("熱床: ");
         lcd.setTextColor(lcd.color565(100, 180, 255), card_bg);
-        lcd.setCursor(286, cardY + 85);
-        lcd.printf("熱床: %d / %d °C", last_bed_temper, last_bed_target);
+        lcd.printf("%d / %d °C", last_bed_temper, last_bed_target);
     }
 
-    if (first_run || pState.chamber_temper != last_chamber_temper) {
-        last_chamber_temper = pState.chamber_temper;
-        lcd.fillRect(280, cardY + 115, 220, 28, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+    if (first_run || pState.chamber_temper != last_chamber_temper || (printer_model == "ideaformer_ir3" && pState.host_temper != last_chamber_temper)) {
+        last_chamber_temper = (printer_model == "ideaformer_ir3" && pState.chamber_temper <= 0) ? pState.host_temper : pState.chamber_temper;
+        lcd.fillRect(280, cardY + 120, 225, 30, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(lcd.color565(150, 255, 150), card_bg);
-        lcd.setCursor(286, cardY + 120);
-        lcd.printf("機箱: %d °C", last_chamber_temper);
+        lcd.setCursor(284, cardY + 122);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        if (printer_model == "ideaformer_ir3") {
+            if (pState.host_temper > 0) {
+                lcd.print("主機: ");
+                lcd.setTextColor(lcd.color565(140, 230, 160), card_bg);
+                lcd.printf("%d °C", pState.host_temper);
+            } else {
+                lcd.print("流量: ");
+                lcd.setTextColor(lcd.color565(140, 230, 160), card_bg);
+                lcd.printf("%d%%", (int)round(pState.extrude_factor * 100.0f));
+            }
+        } else {
+            lcd.print("機箱: ");
+            lcd.setTextColor(lcd.color565(140, 230, 160), card_bg);
+            lcd.printf("%d °C", last_chamber_temper);
+        }
     }
 
     // CARD 3: Layers & Extruders
     if (first_run || pState.layer_num != last_layer_num || pState.total_layer_num != last_total_layer_num) {
         last_layer_num = pState.layer_num;
         last_total_layer_num = pState.total_layer_num;
-        lcd.fillRect(535, cardY + 45, 240, 28, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(535, cardY + 46, 240, 30, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(TFT_YELLOW, card_bg);
-        lcd.setCursor(542, cardY + 50);
-        lcd.printf("層數: %d / %d", last_layer_num, last_total_layer_num);
+        lcd.setCursor(540, cardY + 48);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        lcd.print("層數: ");
+        lcd.setTextColor(lcd.color565(250, 204, 21), card_bg);
+        lcd.printf("%d / %d", last_layer_num, last_total_layer_num);
     }
 
     if (first_run || pState.gcode_file != last_gcode_file) {
         last_gcode_file = pState.gcode_file;
-        lcd.fillRect(535, cardY + 80, 240, 28, card_bg);
-        lcd.setFont(&fonts::efontTW_16);
+        lcd.fillRect(535, cardY + 83, 240, 30, card_bg);
+        lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
-        lcd.setTextColor(TFT_LIGHTGRAY, card_bg);
-        lcd.setCursor(542, cardY + 85);
+        lcd.setCursor(540, cardY + 85);
+        lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
+        lcd.print("檔案: ");
+        lcd.setTextColor(TFT_WHITE, card_bg);
         String fname = last_gcode_file;
-        if (fname.length() > 18) fname = fname.substring(0, 15) + "...";
-        lcd.printf("檔案: %s", fname.length() > 0 ? fname.c_str() : "無任務");
+        if (fname.endsWith(".gcode")) fname = fname.substring(0, fname.length() - 6);
+        if (fname.length() > 14) fname = fname.substring(0, 11) + "..";
+        lcd.print(fname.length() > 0 ? fname : "無任務");
     }
 
-    // 4 Slots Indicators (T1 ~ T4 Real Filament Colors - Enlarged Display)
-    for (int i = 0; i < 4; i++) {
-        if (first_run || pState.t_state[i] != last_t_state[i] || pState.filament_rgb[i] != last_filament_rgb[i] || pState.filament_loaded[i] != last_filament_loaded[i]) {
-            last_t_state[i] = pState.t_state[i];
-            last_filament_rgb[i] = pState.filament_rgb[i];
-            last_filament_loaded[i] = pState.filament_loaded[i];
+    // Bottom of Card 3: Filament / Machine specific details
+    if (printer_model == "ideaformer_ir3") {
+        static float last_filament_used_m = -1.0f;
+        static String last_fil_name = "UNSET";
+        static int last_speed_pct = -1;
+        static int last_flow_pct = -1;
 
-            int cx = 562 + i * 60;
-            int cy = cardY + 138;
-            bool loaded = pState.filament_loaded[i] && (pState.t_state[i].length() == 0 || pState.t_state[i] != "wait_insert");
-            
-            uint8_t r = (pState.filament_rgb[i] >> 16) & 0xFF;
-            uint8_t g = (pState.filament_rgb[i] >> 8) & 0xFF;
-            uint8_t b = pState.filament_rgb[i] & 0xFF;
-            // Hardware RGB Pin mapping: pass (b, g, r) to match Sunton 7" LCD bus wiring
-            uint16_t fill_color = loaded ? lcd.color565(b, g, r) : lcd.color565(55, 42, 35);
-            
-            // Calculate brightness to ensure text contrast
-            int brightness = (r * 299 + g * 587 + b * 114) / 1000;
-            
-            // Draw enlarged filled colored circle (Radius = 17, Diameter = 34px)
-            lcd.fillCircle(cx, cy, 17, fill_color);
-            // Outer crisp border so dark/black filaments stand out
-            lcd.drawCircle(cx, cy, 17, loaded ? lcd.color565(190, 210, 240) : lcd.color565(65, 75, 95));
+        int cur_speed_pct = (int)round(pState.speed_factor * 100.0f);
+        int cur_flow_pct = (int)round(pState.extrude_factor * 100.0f);
 
-            // Choose text color (White for dark colors, Black for bright colors)
-            uint16_t text_col = (!loaded) ? lcd.color565(90, 100, 120) : (brightness > 135 ? TFT_BLACK : TFT_WHITE);
+        if (first_run || pState.filament_used_m != last_filament_used_m || pState.filament_name != last_fil_name ||
+            cur_speed_pct != last_speed_pct || cur_flow_pct != last_flow_pct) {
+            last_filament_used_m = pState.filament_used_m;
+            last_fil_name = pState.filament_name;
+            last_speed_pct = cur_speed_pct;
+            last_flow_pct = cur_flow_pct;
 
-            // Bold centered text (Shifted X by +2px for perfect geometric centering)
-            lcd.setFont(&fonts::Font0);
-            lcd.setTextSize(2);
-            lcd.setTextPadding(0);
-            lcd.setTextDatum(textdatum_t::middle_center);
-            lcd.setTextColor(text_col, fill_color);
-            lcd.drawString("T" + String(i + 1), cx + 2, cy);
-            
-            // Reset text attributes
-            lcd.setTextDatum(textdatum_t::top_left);
+            lcd.fillRect(535, cardY + 115, 240, 55, card_bg);
+            lcd.setFont(&fonts::efontTW_16);
             lcd.setTextSize(1);
+            lcd.setTextPadding(0);
+
+            // Row 1: Filament Name & Usage
+            lcd.setCursor(542, cardY + 120);
+            lcd.setTextColor(lcd.color565(180, 160, 255), card_bg);
+            String fName = (last_fil_name.length() > 0) ? last_fil_name : "通用耗材";
+            if (fName.length() > 12) fName = fName.substring(0, 11) + "..";
+            lcd.printf("[%s] %.1fm", fName.c_str(), last_filament_used_m);
+
+            // Row 2: Speed & Flow rates
+            lcd.setCursor(542, cardY + 146);
+            lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+            lcd.printf("速度: %d%% | 流量: %d%%", last_speed_pct, last_flow_pct);
+        }
+    } else {
+        // Standard Snapmaker U1: 4 Slots Indicators (T1 ~ T4 Real Filament Colors - Enlarged Display)
+        if (first_run) {
+            lcd.fillRect(535, cardY + 118, 245, 55, card_bg);
+        }
+        for (int i = 0; i < 4; i++) {
+            if (first_run || pState.t_state[i] != last_t_state[i] || pState.filament_rgb[i] != last_filament_rgb[i] || pState.filament_loaded[i] != last_filament_loaded[i]) {
+                last_t_state[i] = pState.t_state[i];
+                last_filament_rgb[i] = pState.filament_rgb[i];
+                last_filament_loaded[i] = pState.filament_loaded[i];
+
+                int cx = 562 + i * 60;
+                int cy = cardY + 141;
+                bool loaded = pState.filament_loaded[i] && (pState.t_state[i].length() == 0 || pState.t_state[i] != "wait_insert");
+                
+                uint8_t r = (pState.filament_rgb[i] >> 16) & 0xFF;
+                uint8_t g = (pState.filament_rgb[i] >> 8) & 0xFF;
+                uint8_t b = pState.filament_rgb[i] & 0xFF;
+#if defined(BOARD_CYD_50)
+                // Standard RGB565 color mapping for Sunton 5.0"
+                uint16_t fill_color = loaded ? lcd.color565(r, g, b) : lcd.color565(55, 42, 35);
+#else
+                // Hardware RGB Pin mapping: pass (b, g, r) to match Sunton 7" LCD bus wiring
+                uint16_t fill_color = loaded ? lcd.color565(b, g, r) : lcd.color565(55, 42, 35);
+#endif
+                
+                // Calculate brightness to ensure text contrast
+                int brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                
+                // Draw enlarged filled colored circle (Radius = 17, Diameter = 34px)
+                lcd.fillCircle(cx, cy, 17, fill_color);
+                // Outer crisp border so dark/black filaments stand out
+                lcd.drawCircle(cx, cy, 17, loaded ? lcd.color565(190, 210, 240) : lcd.color565(65, 75, 95));
+
+                // Choose text color (White for dark colors, Black for bright colors)
+                uint16_t text_col = (!loaded) ? lcd.color565(90, 100, 120) : (brightness > 135 ? TFT_BLACK : TFT_WHITE);
+
+                // Bold centered text (Shifted X by +2px for perfect geometric centering)
+                lcd.setFont(&fonts::Font0);
+                lcd.setTextSize(2);
+                lcd.setTextPadding(0);
+                lcd.setTextDatum(textdatum_t::middle_center);
+                lcd.setTextColor(text_col, fill_color);
+                lcd.drawString("T" + String(i + 1), cx + 2, cy);
+                
+                // Reset text attributes
+                lcd.setTextDatum(textdatum_t::top_left);
+                lcd.setTextSize(1);
+            }
         }
     }
 
@@ -1128,7 +1227,7 @@ void setup() {
     // 原生高品質粗體標題 (36px)
     lcd.setTextSize(1.5);
     lcd.setTextColor(TFT_CYAN);
-    lcd.drawString("SnapMatrix CYD-7 智慧面板 v1.0", 400, 180);
+    lcd.drawString("SnapMatrix CYD-7 智慧面板 v1.1", 400, 180);
 
     // 原生高品質粗體連線中提示 (29px)
     lcd.setTextSize(1.2);
@@ -1147,8 +1246,9 @@ void setup() {
 
     preferences.begin("snap_cyd", false);
     printer_ip = preferences.getString("printer_ip", "192.168.1.100");
+    printer_model = preferences.getString("printer_model", "snapmaker_u1");
     sleep_timeout = preferences.getInt("sleep_timeout", 10);
-    Serial.printf("[Preferences] 開機載入休眠時間: %d 分鐘\n", sleep_timeout);
+    Serial.printf("[Preferences] 開機載入機型: %s, 休眠時間: %d 分鐘\n", printer_model.c_str(), sleep_timeout);
 
     // WiFiManager Setup
     WiFiManager wm;
@@ -1181,7 +1281,7 @@ void setup() {
         // 標題加大 (原生 24px 粗體 x 1.8 = ~44px 超大粗體)
         lcd.setTextSize(1.8);
         lcd.setTextColor(TFT_CYAN);
-        lcd.drawString("SnapMatrix 初始配網模式 v1.0", 400, 80);
+        lcd.drawString("SnapMatrix 初始配網模式 v1.1", 400, 80);
         
         // 原生 24px 粗體各項指示
         lcd.setTextSize(1.0);
@@ -1260,7 +1360,7 @@ void setup() {
         }
 
         String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                      "<title>SnapMatrix CYD-7 控制面板 v1.0</title><style>"
+                      "<title>SnapMatrix CYD-7 控制面板 v1.1</title><style>"
                       "body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','PingFang TC','Microsoft JhengHei','Segoe UI',sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box;-webkit-font-smoothing:antialiased;}"
                       ".card{background:rgba(30,41,59,0.85);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.15);padding:36px;border-radius:24px;width:100%;max-width:540px;box-shadow:0 24px 48px rgba(0,0,0,0.5);}"
                       "h2{margin-top:0;color:#38bdf8;font-size:28px;font-weight:800;display:flex;align-items:center;gap:12px;margin-bottom:24px;letter-spacing:0.5px;}"
@@ -1274,16 +1374,21 @@ void setup() {
                       ".status{font-size:17px;font-weight:600;line-height:1.6;color:#10b981;margin-bottom:26px;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.25);padding:14px 18px;border-radius:12px;display:flex;flex-direction:column;gap:8px;}"
                       ".status-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;}"
                       "</style></head><body><div class='card'>"
-                      "<h2>SnapMatrix 控制面板 <span style='font-size:15px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;padding:3px 10px;border-radius:20px;font-weight:700;margin-left:auto;'>v1.0 正式版</span></h2>"
+                      "<h2>SnapMatrix 控制面板 <span style='font-size:15px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;padding:3px 10px;border-radius:20px;font-weight:700;margin-left:auto;'>v1.1 正式版</span></h2>"
                       "<div class='status'>"
                       "<div class='status-row'><span>裝置 IP: " + WiFi.localIP().toString() + "</span><span id='conn-status'>狀態: " + (pState.is_connected ? "已連線" : "未連線") + "</span></div>"
-                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.0</span></div>"
+                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.1</span></div>"
                       "<div class='status-row'><span style='color:#a78bfa;'>🖨️ 印表機 ROM:</span><span id='rom-text' style='font-weight:600;color:#fff;'>" + rom_info + "</span></div>"
                       "<div class='status-row'><span style='color:#38bdf8;'>⛅ 當前天氣:</span><span>" + weather_status + "</span></div>"
                       "</div>"
                       "<form action='/save' method='POST'>"
-                      "<label>Moonraker 印表機 IP (Snapmaker):</label>"
-                      "<input type='text' name='printer_ip' value='" + printer_ip + "' placeholder='例如: 192.168.3.122' required>"
+                      "<label>選擇印表機機型 (Profile):</label>"
+                      "<select name='printer_model' style='width:100%;padding:16px 18px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#fff;font-size:18px;font-weight:600;margin-bottom:24px;box-sizing:border-box;outline:none;font-family:inherit;'>"
+                      "<option value='snapmaker_u1'" + String(printer_model == "snapmaker_u1" ? " selected" : "") + ">Snapmaker U1 (4色/多耗材)</option>"
+                      "<option value='ideaformer_ir3'" + String(printer_model == "ideaformer_ir3" ? " selected" : "") + ">Ideaformer IR3 V2 (輸送帶/標準Klipper)</option>"
+                      "</select>"
+                      "<label>Moonraker 印表機 IP 位址:</label>"
+                      "<input type='text' name='printer_ip' value='" + printer_ip + "' placeholder='例如: 192.168.200.235' required>"
                       "<label>螢幕自動休眠時間 (分鐘，0 為不休眠):</label>"
                       "<input type='number' name='sleep' value='" + String(sleep_timeout) + "' min='0' max='120'>"
                       "<button type='submit'>💾 儲存設定並重新連線</button>"
@@ -1303,14 +1408,31 @@ void setup() {
     });
 
     server.on("/save", HTTP_POST, []() {
+        bool need_reconnect = false;
+        if (server.hasArg("printer_model")) {
+            String new_model = server.arg("printer_model");
+            new_model.trim();
+            if (new_model.length() > 0 && new_model != printer_model) {
+                printer_model = new_model;
+                preferences.putString("printer_model", printer_model);
+                moonraker.setPrinterProfile(printer_model);
+                dashboard_initialized = false;
+                need_reconnect = true;
+                Serial.printf("[Preferences] 已儲存並切換印表機機型: %s\n", printer_model.c_str());
+            }
+        }
         if (server.hasArg("printer_ip")) {
             String new_ip = server.arg("printer_ip");
             new_ip.trim();
-            if (new_ip.length() > 0) {
+            if (new_ip.length() > 0 && (new_ip != printer_ip || need_reconnect)) {
                 printer_ip = new_ip;
                 preferences.putString("printer_ip", printer_ip);
                 moonraker.setPrinterIP(printer_ip);
+                need_reconnect = false;
             }
+        }
+        if (need_reconnect) {
+            moonraker.setPrinterIP(printer_ip);
         }
         if (server.hasArg("sleep")) {
             sleep_timeout = server.arg("sleep").toInt();
@@ -1344,6 +1466,7 @@ void setup() {
     Serial.println("[OTA] Web Server started on port 80 /update");
 
     // Connect to Moonraker
+    moonraker.setPrinterProfile(printer_model);
     moonraker.begin(printer_ip, 7125);
 }
 
