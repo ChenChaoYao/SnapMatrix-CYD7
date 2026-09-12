@@ -1076,7 +1076,7 @@ void renderStandbyUI(const PrinterState& pState) {
 void renderDashboardUI(const PrinterState& pState) {
     static bool first_run = true;
     static bool last_connected = false;
-    static String last_printer_ip = "";
+    static String last_printer_info = "";
     static String last_device_ip = "";
     
     // Card 1 cache
@@ -1113,7 +1113,7 @@ void renderDashboardUI(const PrinterState& pState) {
         first_run = true;
         dashboard_initialized = false;
         last_connected = !pState.is_connected;
-        last_printer_ip = "";
+        last_printer_info = "";
         last_device_ip = "";
         last_mc_percent = -1;
         last_gcode_state = "";
@@ -1166,44 +1166,44 @@ void renderDashboardUI(const PrinterState& pState) {
     uint16_t card_bg = lcd.color565(20, 28, 44);
     int cardY = 280;
 
-    // Header: Online state
-    if (first_run || pState.is_connected != last_connected) {
-        last_connected = pState.is_connected;
-        lcd.setFont(&fonts::efontTW_16);
-        lcd.setTextSize(1);
-        lcd.setTextPadding(90);
-        lcd.setTextColor(pState.is_connected ? TFT_GREEN : TFT_RED, header_bg);
-        lcd.setCursor(680, 16);
-        lcd.print(pState.is_connected ? "[已連線]" : "[未連線]");
-    }
-
-    // Header: Printer IP & ROM Version
-    static String last_printer_info = "";
+    // Header Right-Hand Status: Printer Info, Device IP, Online state (Right-Aligned)
     String cur_printer_info = (pState.rom_version.length() > 0) ? 
         ("印表機: " + moonraker.printer_ip + " (" + pState.rom_version + ")") : 
         ("印表機: " + moonraker.printer_ip);
-
-    if (first_run || cur_printer_info != last_printer_info) {
-        last_printer_info = cur_printer_info;
-        lcd.setFont(&fonts::efontTW_16);
-        lcd.setTextSize(1);
-        lcd.setTextPadding(260);
-        lcd.setTextColor(TFT_LIGHTGRAY, header_bg);
-        lcd.setCursor(215, 16);
-        lcd.print(last_printer_info);
-    }
-
-    // Header: Device IP
     String cur_device_ip = WiFi.localIP().toString();
-    if (first_run || cur_device_ip != last_device_ip) {
+
+    if (first_run || pState.is_connected != last_connected || cur_printer_info != last_printer_info || cur_device_ip != last_device_ip) {
+        last_connected = pState.is_connected;
+        last_printer_info = cur_printer_info;
         last_device_ip = cur_device_ip;
+
+        // Clear header right section (from after title ~X=215 up to right margin X=795)
+        lcd.fillRect(215, 12, 580, 26, header_bg);
+
         lcd.setFont(&fonts::efontTW_16);
         lcd.setTextSize(1);
-        lcd.setTextPadding(180);
-        lcd.setTextColor(TFT_LIGHTGRAY, header_bg);
-        lcd.setCursor(485, 16);
-        lcd.printf("本機: %s", last_device_ip.c_str());
         lcd.setTextPadding(0);
+        lcd.setTextDatum(textdatum_t::top_left);
+
+        // 1. Online state: right-anchored at 784 (matches Card 3 and Matrix right boundary)
+        String cur_conn_str = pState.is_connected ? "[已連線]" : "[未連線]";
+        int conn_w = lcd.textWidth(cur_conn_str.c_str());
+        int conn_x = 784 - conn_w;
+        lcd.setTextColor(pState.is_connected ? TFT_GREEN : TFT_RED, header_bg);
+        lcd.drawString(cur_conn_str, conn_x, 16);
+
+        // 2. Device IP: placed to the left of online state with 16px gap
+        String dev_str = "本機: " + cur_device_ip;
+        int dev_w = lcd.textWidth(dev_str.c_str());
+        int dev_x = conn_x - 16 - dev_w;
+        lcd.setTextColor(TFT_LIGHTGRAY, header_bg);
+        lcd.drawString(dev_str, dev_x, 16);
+
+        // 3. Printer Info: placed to the left of device IP with 16px gap
+        int printer_w = lcd.textWidth(cur_printer_info.c_str());
+        int printer_x = dev_x - 16 - printer_w;
+        if (printer_x < 220) printer_x = 220; // Prevent collision with title on the left
+        lcd.drawString(cur_printer_info, printer_x, 16);
     }
 
     // Serial Logging (Throttled every 3 seconds)
