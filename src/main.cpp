@@ -1644,6 +1644,14 @@ void setup() {
         }
         String json = "{\"connected\":" + String(pState.is_connected ? "true" : "false") + 
                       ",\"rom\":\"" + rom_info + "\"" +
+                      ",\"percent\":" + String(pState.mc_percent) +
+                      ",\"v_sd\":" + String(pState.v_sd_progress, 4) +
+                      ",\"disp\":" + String(pState.display_progress, 4) +
+                      ",\"has_disp\":" + String(pState.has_display_progress ? "true" : "false") +
+                      ",\"gcode_state\":\"" + pState.gcode_state + "\"" +
+                      ",\"rem_time\":" + String(pState.mc_remaining_time) +
+                      ",\"nozzle\":" + String(pState.nozzle_temper) +
+                      ",\"bed\":" + String(pState.bed_temper) +
                       ",\"ts_enabled\":" + String(tailscaleService.isEnabled() ? "true" : "false") +
                       ",\"ts_connected\":" + String(tailscaleService.isConnected() ? "true" : "false") +
                       ",\"ts_ip\":\"" + tailscaleService.getVpnIp() + "\"" +

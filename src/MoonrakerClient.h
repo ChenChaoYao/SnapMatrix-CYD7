@@ -196,6 +196,33 @@ public:
         }
     }
 
+    void fetchCurrentStatus() {
+        if (printer_ip.length() == 0) return;
+        HTTPClient http;
+        String url;
+        if (printer_profile == "ideaformer_ir3") {
+            url = "http://" + printer_ip + ":" + String(printer_port) + 
+                  "/printer/objects/query?print_stats&display_status&toolhead&gcode_move&extruder&heater_bed&virtual_sdcard";
+        } else {
+            url = "http://" + printer_ip + ":" + String(printer_port) + 
+                  "/printer/objects/query?print_stats&display_status&toolhead&gcode_move&extruder&extruder1&extruder2&extruder3&heater_bed&virtual_sdcard&print_task_config&probe&auto_screws_tilt_adjust&machine_state_manager&bed_mesh";
+        }
+        http.begin(url);
+        http.setTimeout(3000);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            DynamicJsonDocument doc(16384);
+            if (!deserializeJson(doc, payload)) {
+                if (doc.containsKey("result") && doc["result"].containsKey("status")) {
+                    handleStatus(doc["result"]["status"].as<JsonObject>());
+                    Serial.printf("[Moonraker] Authoritative status synchronized via HTTP!\n");
+                }
+            }
+        }
+        http.end();
+    }
+
     void queryIdeaformerSensors() {
         if (printer_ip.length() == 0) return;
         HTTPClient http;
@@ -448,6 +475,7 @@ private:
                     xSemaphoreGive(mutex);
                 }
                 sendSubscriptions();
+                fetchCurrentStatus();
                 if (printer_profile == "snapmaker_u1") fetchPrintTaskConfig();
                 fetchSystemInfo();
                 if (state.gcode_file.length() > 0) fetchMetadata(state.gcode_file);
@@ -576,17 +604,17 @@ private:
 
         // Unified progress calculation
         int new_percent = 0;
-        if (state.has_display_progress) {
+        if (state.has_display_progress && state.display_progress > 0.0001f) {
             new_percent = (int)round(state.display_progress * 100.0f);
-        } else {
+        } else if (state.v_sd_progress > 0.0001f) {
             new_percent = (int)round(state.v_sd_progress * 100.0f);
         }
         if (new_percent < 0) new_percent = 0;
         if (new_percent > 100) new_percent = 100;
 
-        // Monotonic increase protection during active printing
+        // Progress update & synchronization (suppress small 1% jitter, but sync immediately if gap >= 3% or on fresh state)
         if (state.raw_gcode_state == "RUNNING" || state.raw_gcode_state == "PAUSE") {
-            if (new_percent >= state.mc_percent || state.raw_print_duration < 10) {
+            if (new_percent >= state.mc_percent || state.raw_print_duration < 10 || abs(new_percent - state.mc_percent) >= 3 || state.mc_percent == 0) {
                 state.mc_percent = new_percent;
             }
         } else {
