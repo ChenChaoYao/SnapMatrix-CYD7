@@ -10,6 +10,7 @@
 #include "VirtualMatrix.h"
 #include "MoonrakerClient.h"
 #include "WeatherService.h"
+#include "TailscaleService.h"
 
 // Hardware instances
 LGFX lcd;
@@ -22,9 +23,65 @@ Preferences preferences;
 // Configuration
 String printer_ip = "192.168.1.100";
 String printer_model = "snapmaker_u1"; // "snapmaker_u1" or "ideaformer_ir3"
+bool ts_enabled = false;
+String ts_auth_key = "";
+#ifdef BOARD_CYD_50
+#define DEFAULT_TS_DEV_NAME "snapmatrix-cyd5"
+#else
+#define DEFAULT_TS_DEV_NAME "snapmatrix-cyd7"
+#endif
+String ts_dev_name = DEFAULT_TS_DEV_NAME;
+String ts_subnet_router = "";
 String display_text = "CONNECTING TO WI-FI...";
 String current_display_state = "IDLE";
 int x_pos = MATRIX_WIDTH;
+
+// 各機型獨立設定結構與函式
+struct PrinterProfileConfig {
+    String ip;
+    bool ts_enabled;
+    String ts_auth_key;
+    String ts_dev_name;
+    String ts_subnet;
+};
+
+PrinterProfileConfig getProfileConfig(const String &model) {
+    PrinterProfileConfig cfg;
+    if (model == "ideaformer_ir3") {
+        cfg.ip = preferences.getString("ir3_ip", "192.168.200.235");
+        cfg.ts_enabled = preferences.getBool("ir3_ts_en", true);
+        cfg.ts_auth_key = preferences.getString("ir3_ts_key", preferences.getString("ts_auth_key", ""));
+        cfg.ts_dev_name = preferences.getString("ir3_ts_dev", DEFAULT_TS_DEV_NAME);
+        cfg.ts_subnet = preferences.getString("ir3_ts_sub", "100.64.121.55");
+    } else {
+        cfg.ip = preferences.getString("u1_ip", preferences.getString("printer_ip", "192.168.3.122"));
+        cfg.ts_enabled = preferences.getBool("u1_ts_en", false);
+        cfg.ts_auth_key = preferences.getString("u1_ts_key", preferences.getString("ts_auth_key", ""));
+        cfg.ts_dev_name = preferences.getString("u1_ts_dev", DEFAULT_TS_DEV_NAME);
+        cfg.ts_subnet = preferences.getString("u1_ts_sub", "");
+    }
+    return cfg;
+}
+
+void saveProfileConfig(const String &model, const PrinterProfileConfig &cfg) {
+    String prefix = (model == "ideaformer_ir3") ? "ir3" : "u1";
+    preferences.putString((prefix + "_ip").c_str(), cfg.ip);
+    preferences.putBool((prefix + "_ts_en").c_str(), cfg.ts_enabled);
+    preferences.putString((prefix + "_ts_key").c_str(), cfg.ts_auth_key);
+    preferences.putString((prefix + "_ts_dev").c_str(), cfg.ts_dev_name);
+    preferences.putString((prefix + "_ts_sub").c_str(), cfg.ts_subnet);
+}
+
+void applyProfile(const String &model) {
+    printer_model = model;
+    preferences.putString("printer_model", printer_model);
+    PrinterProfileConfig cfg = getProfileConfig(model);
+    printer_ip = cfg.ip;
+    ts_enabled = cfg.ts_enabled;
+    ts_auth_key = cfg.ts_auth_key;
+    ts_dev_name = cfg.ts_dev_name;
+    ts_subnet_router = cfg.ts_subnet;
+}
 
 // UI & Animations
 uint32_t current_text_color = 0x00FFFF;
@@ -1481,10 +1538,11 @@ void setup() {
     lcd.setFont(&fonts::efontTW_16);
 
     preferences.begin("snap_cyd", false);
-    printer_ip = preferences.getString("printer_ip", "192.168.1.100");
     printer_model = preferences.getString("printer_model", "snapmaker_u1");
     sleep_timeout = preferences.getInt("sleep_timeout", 10);
-    Serial.printf("[Preferences] 開機載入機型: %s, 休眠時間: %d 分鐘\n", printer_model.c_str(), sleep_timeout);
+    applyProfile(printer_model);
+    Serial.printf("[Preferences] 開機載入機型: %s, 印表機IP: %s, 休眠: %d 分鐘, Tailscale: %s (裝置: %s, Subnet Router: %s)\n", 
+                  printer_model.c_str(), printer_ip.c_str(), sleep_timeout, ts_enabled ? "啟用" : "關閉", ts_dev_name.c_str(), ts_subnet_router.c_str());
 
     // WiFiManager Setup
     WiFiManager wm;
@@ -1551,6 +1609,21 @@ void setup() {
         preferences.putString("printer_ip", printer_ip);
     }
 
+    // Tailscale State Callback
+    tailscaleService.onStateChange([](bool connected, const String &vpnIp) {
+        if (connected) {
+            Serial.printf("[Tailscale Event] VPN 連線就緒 (IP: %s)，嘗試重連印表機: %s\n", 
+                          vpnIp.c_str(), printer_ip.c_str());
+            moonraker.setPrinterIP(printer_ip);
+        }
+    });
+
+    // Start Tailscale Client if enabled
+    if (ts_enabled && ts_auth_key.length() > 0) {
+        Serial.println("[Tailscale] 正在啟動 Tailscale VPN 客戶端服務...");
+        tailscaleService.begin(true, ts_auth_key, ts_dev_name, printer_ip, ts_subnet_router);
+    }
+
     // NTP Time Sync
     configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
@@ -1570,7 +1643,12 @@ void setup() {
             rom_info = "尚未連線至印表機";
         }
         String json = "{\"connected\":" + String(pState.is_connected ? "true" : "false") + 
-                      ",\"rom\":\"" + rom_info + "\"}";
+                      ",\"rom\":\"" + rom_info + "\"" +
+                      ",\"ts_enabled\":" + String(tailscaleService.isEnabled() ? "true" : "false") +
+                      ",\"ts_connected\":" + String(tailscaleService.isConnected() ? "true" : "false") +
+                      ",\"ts_ip\":\"" + tailscaleService.getVpnIp() + "\"" +
+                      ",\"ts_status\":\"" + tailscaleService.getStateString() + "\"" +
+                      ",\"ts_debug\":" + tailscaleService.getDebugJson() + "}";
         server.send(200, "application/json", json);
     });
 
@@ -1595,6 +1673,9 @@ void setup() {
             rom_info = "尚未連線至印表機";
         }
 
+        PrinterProfileConfig u1_cfg = getProfileConfig("snapmaker_u1");
+        PrinterProfileConfig ir3_cfg = getProfileConfig("ideaformer_ir3");
+
         String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
                       "<title>SnapMatrix 控制面板 v1.3</title><style>"
                       "body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','PingFang TC','Microsoft JhengHei','Segoe UI',sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box;-webkit-font-smoothing:antialiased;}"
@@ -1616,26 +1697,76 @@ void setup() {
                       "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.3</span></div>"
                       "<div class='status-row'><span style='color:#a78bfa;'>🖨️ 印表機 ROM:</span><span id='rom-text' style='font-weight:600;color:#fff;'>" + rom_info + "</span></div>"
                       "<div class='status-row'><span style='color:#38bdf8;'>⛅ 當前天氣:</span><span>" + weather_status + "</span></div>"
+                      "<div class='status-row'><span style='color:#38bdf8;'>🌐 Tailscale:</span><span id='ts-status-text' style='font-weight:600;'>" + tailscaleService.getStateString() + "</span></div>"
                       "</div>"
                       "<form action='/save' method='POST'>"
                       "<label>選擇印表機機型 (Profile):</label>"
-                      "<select name='printer_model' style='width:100%;padding:16px 18px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#fff;font-size:18px;font-weight:600;margin-bottom:24px;box-sizing:border-box;outline:none;font-family:inherit;'>"
+                      "<select id='printer_model' name='printer_model' onchange='onProfileChange(this.value)' style='width:100%;padding:16px 18px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#fff;font-size:18px;font-weight:600;margin-bottom:24px;box-sizing:border-box;outline:none;font-family:inherit;'>"
                       "<option value='snapmaker_u1'" + String(printer_model == "snapmaker_u1" ? " selected" : "") + ">Snapmaker U1 (4色/多耗材)</option>"
                       "<option value='ideaformer_ir3'" + String(printer_model == "ideaformer_ir3" ? " selected" : "") + ">Ideaformer IR3 V2 (輸送帶/標準Klipper)</option>"
                       "</select>"
                       "<label>Moonraker 印表機 IP 位址:</label>"
-                      "<input type='text' name='printer_ip' value='" + printer_ip + "' placeholder='例如: 192.168.200.235' required>"
+                      "<input type='text' id='printer_ip' name='printer_ip' value='" + printer_ip + "' oninput='onFieldInput()' placeholder='例如: 192.168.200.235 或 Tailscale IP 100.x.y.z' required>"
                       "<label>螢幕自動休眠時間 (分鐘，0 為不休眠):</label>"
                       "<input type='number' name='sleep' value='" + String(sleep_timeout) + "' min='0' max='120'>"
+                      "<div style='margin:20px 0 26px 0;padding:18px;background:rgba(15,23,42,0.6);border:1px solid #334155;border-radius:14px;'>"
+                      "<label style='display:flex;align-items:center;cursor:pointer;gap:12px;font-size:18px;font-weight:700;color:#38bdf8;margin:0;'>"
+                      "<input type='checkbox' id='ts_enabled' name='ts_enabled' value='1' onchange='onFieldInput()' style='width:22px;height:22px;accent-color:#0284c7;cursor:pointer;' " + String(ts_enabled ? "checked" : "") + ">"
+                      "啟用 Tailscale VPN 遠端穿透"
+                      "</label>"
+                      "<div style='font-size:14px;color:#94a3b8;margin:8px 0 16px 0;line-height:1.4;'>啟用後可直接填寫 Tailscale 內網 IP (100.x.y.z) 跨網段連線家中 3D 印表機。</div>"
+                      "<label style='font-size:16px;'>Tailscale Auth Key (tskey-auth-...):</label>"
+                      "<input type='text' id='ts_auth_key' name='ts_auth_key' value='" + ts_auth_key + "' oninput='onFieldInput()' placeholder='tskey-auth-xxxxx' style='margin-bottom:14px;'>"
+                      "<label style='font-size:16px;'>Tailnet 裝置名稱 (Device Name):</label>"
+                      "<input type='text' id='ts_dev_name' name='ts_dev_name' value='" + ts_dev_name + "' oninput='onFieldInput()' placeholder='snapmatrix-cyd' style='margin-bottom:14px;'>"
+                      "<label style='font-size:16px;'>子網路由閘道 IP (Subnet Router，選填):</label>"
+                      "<input type='text' id='ts_subnet_router' name='ts_subnet_router' value='" + ts_subnet_router + "' oninput='onFieldInput()' placeholder='例如: 100.64.121.55 (若印表機在遠端 LAN 填寫)' style='margin-bottom:0;'>"
+                      "</div>"
                       "<button type='submit'>💾 儲存設定並重新連線</button>"
                       "</form>"
                       "<a class='btn-ota' href='/update'>🚀 開啟 OTA 韌體無線更新</a>"
                       "</div>"
                       "<script>"
+                      "var profilesData = {"
+                      "'snapmaker_u1':{"
+                      "'ip':'" + u1_cfg.ip + "',"
+                      "'ts_enabled':" + String(u1_cfg.ts_enabled ? "true" : "false") + ","
+                      "'ts_auth_key':'" + u1_cfg.ts_auth_key + "',"
+                      "'ts_dev_name':'" + u1_cfg.ts_dev_name + "',"
+                      "'ts_subnet':'" + u1_cfg.ts_subnet + "'"
+                      "},"
+                      "'ideaformer_ir3':{"
+                      "'ip':'" + ir3_cfg.ip + "',"
+                      "'ts_enabled':" + String(ir3_cfg.ts_enabled ? "true" : "false") + ","
+                      "'ts_auth_key':'" + ir3_cfg.ts_auth_key + "',"
+                      "'ts_dev_name':'" + ir3_cfg.ts_dev_name + "',"
+                      "'ts_subnet':'" + ir3_cfg.ts_subnet + "'"
+                      "}"
+                      "};"
+                      "var curModel = document.getElementById('printer_model').value;"
+                      "function onFieldInput(){"
+                      "if(!profilesData[curModel])return;"
+                      "profilesData[curModel].ip=document.getElementById('printer_ip').value;"
+                      "profilesData[curModel].ts_enabled=document.getElementById('ts_enabled').checked;"
+                      "profilesData[curModel].ts_auth_key=document.getElementById('ts_auth_key').value;"
+                      "profilesData[curModel].ts_dev_name=document.getElementById('ts_dev_name').value;"
+                      "profilesData[curModel].ts_subnet=document.getElementById('ts_subnet_router').value;"
+                      "}"
+                      "function onProfileChange(model){"
+                      "curModel=model;"
+                      "var d=profilesData[model];"
+                      "if(!d)return;"
+                      "document.getElementById('printer_ip').value=d.ip;"
+                      "document.getElementById('ts_enabled').checked=d.ts_enabled;"
+                      "document.getElementById('ts_auth_key').value=d.ts_auth_key;"
+                      "document.getElementById('ts_dev_name').value=d.ts_dev_name;"
+                      "document.getElementById('ts_subnet_router').value=d.ts_subnet;"
+                      "}"
                       "function checkRom(){"
                       "fetch('/api/status').then(r=>r.json()).then(d=>{"
                       "if(d.rom){var el=document.getElementById('rom-text');if(el)el.innerText=d.rom;}"
                       "if(d.connected!==undefined){var cs=document.getElementById('conn-status');if(cs)cs.innerText='狀態: '+(d.connected?'已連線':'未連線');}"
+                      "if(d.ts_status){var ts=document.getElementById('ts-status-text');if(ts)ts.innerText=d.ts_status;}"
                       "if(d.rom&&d.rom.indexOf('讀取中')===-1&&d.connected){clearInterval(timer);}"
                       "}).catch(e=>{});}"
                       "var timer=setInterval(checkRom,2000);"
@@ -1644,38 +1775,60 @@ void setup() {
     });
 
     server.on("/save", HTTP_POST, []() {
-        bool need_reconnect = false;
-        if (server.hasArg("printer_model")) {
-            String new_model = server.arg("printer_model");
-            new_model.trim();
-            if (new_model.length() > 0 && new_model != printer_model) {
-                printer_model = new_model;
-                preferences.putString("printer_model", printer_model);
-                moonraker.setPrinterProfile(printer_model);
-                dashboard_initialized = false;
-                need_reconnect = true;
-                Serial.printf("[Preferences] 已儲存並切換印表機機型: %s\n", printer_model.c_str());
-            }
+        String new_model = server.hasArg("printer_model") ? server.arg("printer_model") : printer_model;
+        new_model.trim();
+        if (new_model.length() == 0) new_model = "snapmaker_u1";
+
+        bool model_changed = (new_model != printer_model);
+
+        String new_ip = server.hasArg("printer_ip") ? server.arg("printer_ip") : printer_ip;
+        new_ip.trim();
+
+        bool new_ts_enabled = server.hasArg("ts_enabled");
+        String new_ts_key = server.hasArg("ts_auth_key") ? server.arg("ts_auth_key") : "";
+        String new_ts_dev = server.hasArg("ts_dev_name") ? server.arg("ts_dev_name") : DEFAULT_TS_DEV_NAME;
+        String new_ts_subnet = server.hasArg("ts_subnet_router") ? server.arg("ts_subnet_router") : "";
+        new_ts_key.trim();
+        new_ts_dev.trim();
+        new_ts_subnet.trim();
+
+        // 儲存至該特定 Profile 的專屬設定
+        PrinterProfileConfig cfgToSave;
+        cfgToSave.ip = new_ip;
+        cfgToSave.ts_enabled = new_ts_enabled;
+        cfgToSave.ts_auth_key = new_ts_key;
+        cfgToSave.ts_dev_name = new_ts_dev;
+        cfgToSave.ts_subnet = new_ts_subnet;
+        saveProfileConfig(new_model, cfgToSave);
+
+        // 套用當前選擇的 Profile
+        applyProfile(new_model);
+
+        if (model_changed) {
+            moonraker.setPrinterProfile(printer_model);
+            dashboard_initialized = false;
+            Serial.printf("[Preferences] 已儲存並切換印表機機型: %s\n", printer_model.c_str());
         }
-        if (server.hasArg("printer_ip")) {
-            String new_ip = server.arg("printer_ip");
-            new_ip.trim();
-            if (new_ip.length() > 0 && (new_ip != printer_ip || need_reconnect)) {
-                printer_ip = new_ip;
-                preferences.putString("printer_ip", printer_ip);
-                moonraker.setPrinterIP(printer_ip);
-                need_reconnect = false;
-            }
-        }
-        if (need_reconnect) {
-            moonraker.setPrinterIP(printer_ip);
-        }
+
         if (server.hasArg("sleep")) {
             sleep_timeout = server.arg("sleep").toInt();
             preferences.putInt("sleep_timeout", sleep_timeout);
             idle_start = millis();
             Serial.printf("[Preferences] 已儲存並套用休眠時間: %d 分鐘\n", sleep_timeout);
         }
+
+        Serial.printf("[Preferences] 已儲存 [%s] 設定: IP=%s, TS啟用=%d, 裝置=%s, SubnetRouter=%s\n", 
+                      printer_model.c_str(), printer_ip.c_str(), ts_enabled, ts_dev_name.c_str(), ts_subnet_router.c_str());
+
+        if (ts_enabled && ts_auth_key.length() > 0) {
+            tailscaleService.begin(true, ts_auth_key, ts_dev_name, printer_ip, ts_subnet_router);
+        } else {
+            tailscaleService.stop();
+        }
+
+        tailscaleService.setTargetPeer(printer_ip, ts_subnet_router);
+        moonraker.setPrinterIP(printer_ip);
+
         server.sendHeader("Location", "/");
         server.send(303);
     });
@@ -1715,6 +1868,7 @@ void setup() {
 void loop() {
     server.handleClient();
     ElegantOTA.loop();
+    tailscaleService.update();
 
     if (is_updating) {
         delay(1);
@@ -1722,6 +1876,18 @@ void loop() {
     }
 
     moonraker.loop();
+
+    // Tailscale 遠端連線監控與握手維持
+    if (ts_enabled && printer_ip.startsWith("100.")) {
+        static unsigned long last_ts_retry = 0;
+        if (!moonraker.state.is_connected && tailscaleService.isConnected()) {
+            if (millis() - last_ts_retry >= 15000UL) {
+                last_ts_retry = millis();
+                Serial.printf("[Tailscale Watchdog] 印表機尚未連線，向 %s 喚醒 WireGuard 握手...\n", printer_ip.c_str());
+                tailscaleService.ensurePeerHandshake(printer_ip);
+            }
+        }
+    }
 
     // Periodic Weather Refresh (Every 15 minutes)
     static unsigned long last_weather_refresh = 0;

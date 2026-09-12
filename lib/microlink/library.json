@@ -1,0 +1,17 @@
+{
+  "name": "microlink",
+  "version": "2.1.0",
+  "description": "Tailscale VPN client for ESP32",
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src",
+    "flags": [
+      "-Ilib/microlink/include",
+      "-Ilib/microlink/src",
+      "-Ilib/microlink/src/wireguard_lwip",
+      "-Ilib/microlink/src/wireguard_lwip/crypto",
+      "-Ilib/microlink/src/wireguard_lwip/crypto/refc",
+      "-DWIREGUARD_CRYPTO_REFC=1"
+    ]
+  }
+}
