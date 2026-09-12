@@ -104,6 +104,21 @@ static const unsigned char font5x7[] = {
     0x08, 0x08, 0x2A, 0x1C, 0x08  // ~
 };
 
+// Bold Modern Digital Clock Font (5x7) for 0~9
+static const uint8_t clockDigits5x7[10][5] = {
+    { 0x3E, 0x63, 0x41, 0x63, 0x3E }, // 0
+    { 0x00, 0x42, 0x7F, 0x7F, 0x40 }, // 1
+    { 0x62, 0x73, 0x59, 0x4F, 0x46 }, // 2
+    { 0x22, 0x63, 0x49, 0x7F, 0x36 }, // 3
+    { 0x18, 0x1C, 0x16, 0x7F, 0x7F }, // 4
+    { 0x27, 0x67, 0x45, 0x7D, 0x39 }, // 5
+    { 0x3E, 0x7F, 0x49, 0x7B, 0x32 }, // 6
+    { 0x41, 0x71, 0x3D, 0x0F, 0x03 }, // 7
+    { 0x36, 0x7F, 0x49, 0x7F, 0x36 }, // 8
+    { 0x26, 0x6F, 0x49, 0x7F, 0x3E }  // 9
+};
+
+
 class VirtualMatrix {
 public:
     uint16_t buffer[MATRIX_WIDTH][MATRIX_HEIGHT];
@@ -228,6 +243,63 @@ public:
         }
         cursorX = x;
     }
+
+    // Draw Clock Digit (5x7)
+    void drawClockDigit(int x, int y, int digit, uint16_t color) {
+        if (digit < 0 || digit > 9) return;
+#if defined(BOARD_CYD_50)
+        // 5.0 吋面板：經典原版細體字型 (font5x7 原生細體)
+        drawChar(x, y, '0' + digit, color);
+#else
+        // 7.0 吋面板：現代加粗數位時鐘字體 (clockDigits5x7)
+        for (int i = 0; i < 5; i++) {
+            int px = x + i;
+            if (px < 0 || px >= MATRIX_WIDTH) continue;
+            uint8_t line = clockDigits5x7[digit][i];
+            for (int j = 0; j < 7; j++) {
+                if (line & 0x1) {
+                    drawPixel(px, y + j, color);
+                }
+                line >>= 1;
+            }
+        }
+#endif
+    }
+
+    // Draw Clock Colon
+    void drawClockColon(int x, int y, uint16_t color) {
+#if defined(BOARD_CYD_50)
+        // 5.0 吋面板：原版經典細體冒號 (調用 font5x7 之 ':')
+        drawChar(x - 1, y, ':', color);
+#else
+        // 7.0 吋面板：現代加粗方塊冒號 (2x2 方塊點)
+        for (int i = 0; i < 2; i++) {
+            int px = x + i;
+            if (px < 0 || px >= MATRIX_WIDTH) continue;
+            drawPixel(px, y + 1, color);
+            drawPixel(px, y + 2, color);
+            drawPixel(px, y + 4, color);
+            drawPixel(px, y + 5, color);
+        }
+#endif
+    }
+
+    // Render Centered 24h Clock (26 dots total width, perfectly centered with 3 dots margins)
+    void drawClockTime(int hour, int minute, bool colon_on, uint16_t color, int y = 0) {
+        // Hour (2 digits)
+        drawClockDigit(3, y, hour / 10, color);
+        drawClockDigit(9, y, hour % 10, color);
+
+        // Blinking Colon
+        if (colon_on) {
+            drawClockColon(15, y, color);
+        }
+
+        // Minute (2 digits)
+        drawClockDigit(18, y, minute / 10, color);
+        drawClockDigit(24, y, minute % 10, color);
+    }
+
 
     // Flicker-Free Differential Render into LovyanGFX Display
     void renderToLGFX(LovyanGFX* canvas, int startX = 16, int startY = 65, int pitch = 24, int dotRadius = 9, bool forceAll = false) {

@@ -11,7 +11,7 @@ except ImportError:
     os.system(f"{sys.executable} -m pip install requests")
     import requests
 
-def upload_ota(bin_path, target_ip="192.168.200.104", port=80):
+def upload_ota(bin_path, target_ip="192.168.3.221", port=80):
     if not os.path.isfile(bin_path):
         print(f"[OTA 錯誤] 找不到韌體檔案: {bin_path}")
         sys.exit(1)
@@ -26,7 +26,7 @@ def upload_ota(bin_path, target_ip="192.168.200.104", port=80):
     print(f"[OTA] 檔案 MD5: {file_md5}")
 
     # Step 1: 呼叫 /ota/start
-    start_url = f"http://{target_ip}:{port}/ota/start?mode=fr&hash={file_md5}&size={file_size}"
+    start_url = f"http://{target_ip}:{port}/ota/start?mode=fr&hash={file_md5}"
     print(f"[OTA] 正在通知開發板準備進入 OTA 模式...")
     try:
         r_start = requests.get(start_url, timeout=10)
@@ -96,5 +96,5 @@ if __name__ == "__main__":
         print("用法: python3 ota_upload.py <firmware.bin> [target_ip]")
         sys.exit(1)
     bin_file = sys.argv[1]
-    target_ip = sys.argv[2] if len(sys.argv) > 2 else "192.168.200.104"
+    target_ip = sys.argv[2] if len(sys.argv) > 2 else "192.168.3.221"
     upload_ota(bin_file, target_ip)

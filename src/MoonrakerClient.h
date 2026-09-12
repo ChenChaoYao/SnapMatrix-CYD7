@@ -103,9 +103,11 @@ public:
     unsigned long last_sysinfo_fetch = 0;
     unsigned long last_ptc_fetch = 0;
 
-    void setPrinterProfile(const String& profile) {
-        printer_profile = profile;
-        if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50))) {
+    void resetState() {
+        if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100))) {
+            bool conn = state.is_connected;
+            state = PrinterState();
+            state.is_connected = conn;
             if (printer_profile == "ideaformer_ir3") {
                 state.machine_model = "Ideaformer IR3 V2";
             } else {
@@ -113,6 +115,11 @@ public:
             }
             xSemaphoreGive(mutex);
         }
+    }
+
+    void setPrinterProfile(const String& profile) {
+        printer_profile = profile;
+        resetState();
         if (state.is_connected) {
             sendSubscriptions();
             fetchSystemInfo();
@@ -147,9 +154,9 @@ public:
         if (ip.length() > 0) {
             printer_ip = ip;
             last_sysinfo_fetch = 0;
+            resetState();
             if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50))) {
                 state.is_connected = false;
-                state.rom_version = "";
                 xSemaphoreGive(mutex);
             }
             ws.disconnect();
@@ -167,13 +174,12 @@ public:
     void sendSubscriptions() {
         String subMsg;
         if (printer_profile == "ideaformer_ir3") {
-            // Ideaformer IR3 V2 (Standard Klipper / Conveyor Belt single extruder profile)
+            // Ideaformer IR3 V2: 訂閱標準保證存在的通用物件，杜絕未宣告感測器造成的 404 崩潰
             subMsg = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{"
                      "\"print_stats\":null,\"display_status\":null,\"toolhead\":null,\"gcode_move\":[\"extrude_factor\",\"speed_factor\"],"
-                     "\"extruder\":null,\"heater_bed\":null,\"virtual_sdcard\":null,"
-                     "\"temperature_sensor IR3_HOST\":null,\"temperature_sensor IR3_MCU\":null,\"bed_mesh\":[\"progress\"]}},\"id\":2}";
+                     "\"extruder\":null,\"heater_bed\":null,\"virtual_sdcard\":null}},\"id\":2}";
         } else {
-            // Standard Snapmaker U1 full subscription (4 extruders, cavity, tilt adjust, filament feeds)
+            // Standard Snapmaker U1: 專屬 4 噴頭、腔體、進退料、動作碼、調平訂閱
             subMsg = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{"
                      "\"print_stats\":null,\"display_status\":null,\"toolhead\":null,\"gcode_move\":[\"extrude_factor\",\"speed_factor\"],"
                      "\"extruder\":null,\"extruder1\":null,\"extruder2\":null,\"extruder3\":null,"
@@ -183,7 +189,43 @@ public:
                      "\"filament_feed left\":null,\"filament_feed right\":null,\"bed_mesh\":[\"progress\"]}},\"id\":2}";
         }
         ws.sendTXT(subMsg);
-        Serial.printf("[Moonraker] Sent subscription to %s:%d (Profile: %s)\n", printer_ip.c_str(), printer_port, printer_profile.c_str());
+        Serial.printf("[Moonraker] Sent isolated subscription to %s:%d (Profile: %s)\n", printer_ip.c_str(), printer_port, printer_profile.c_str());
+
+        if (printer_profile == "ideaformer_ir3") {
+            queryIdeaformerSensors();
+        }
+    }
+
+    void queryIdeaformerSensors() {
+        if (printer_ip.length() == 0) return;
+        HTTPClient http;
+        String url = "http://" + printer_ip + ":" + String(printer_port) + "/printer/objects/list";
+        http.begin(url);
+        http.setTimeout(2500);
+        int code = http.GET();
+        if (code == HTTP_CODE_OK) {
+            String payload = http.getString();
+            DynamicJsonDocument doc(4096);
+            if (!deserializeJson(doc, payload) && doc.containsKey("result") && doc["result"].containsKey("objects")) {
+                JsonArray objs = doc["result"]["objects"];
+                String subSensors = "{\"jsonrpc\":\"2.0\",\"method\":\"printer.objects.subscribe\",\"params\":{\"objects\":{";
+                bool hasExtra = false;
+                for (size_t i = 0; i < objs.size(); i++) {
+                    String objName = objs[i].as<String>();
+                    if (objName.startsWith("temperature_sensor") || objName.startsWith("temperature_host")) {
+                        if (hasExtra) subSensors += ",";
+                        subSensors += "\"" + objName + "\":null";
+                        hasExtra = true;
+                    }
+                }
+                subSensors += "}},\"id\":3}";
+                if (hasExtra) {
+                    ws.sendTXT(subSensors);
+                    Serial.printf("[Moonraker] Dynamically subscribed to host sensors for Ideaformer: %s\n", subSensors.c_str());
+                }
+            }
+        }
+        http.end();
     }
 
     void fetchPrintTaskConfig() {
@@ -436,6 +478,7 @@ private:
     void handleStatus(JsonObject status) {
         if (!xSemaphoreTake(mutex, pdMS_TO_TICKS(100))) return;
 
+        // 1. Common Klipper print_stats parsing
         if (status.containsKey("print_stats")) {
             JsonObject ps = status["print_stats"];
             if (ps.containsKey("filename")) {
@@ -531,7 +574,7 @@ private:
             }
         }
 
-        // Unified progress calculation (Consistent source to prevent percentage jumping)
+        // Unified progress calculation
         int new_percent = 0;
         if (state.has_display_progress) {
             new_percent = (int)round(state.display_progress * 100.0f);
@@ -557,266 +600,331 @@ private:
             if (gm.containsKey("speed_factor")) state.speed_factor = gm["speed_factor"].as<float>();
         }
 
-        // Toolhead active extruder
-        if (status.containsKey("toolhead")) {
-            JsonObject th = status["toolhead"];
-            if (th.containsKey("extruder")) {
-                state.active_extruder = th["extruder"].as<String>();
-            }
-        }
-
-        // Extruders & Bed Temperatures
-        const char* extKeys[4] = {"extruder", "extruder1", "extruder2", "extruder3"};
-        for (int i = 0; i < 4; i++) {
-            if (status.containsKey(extKeys[i])) {
-                JsonObject ex = status[extKeys[i]];
-                if (ex.containsKey("temperature")) state.extruder_temper[i] = round(ex["temperature"].as<float>());
-                if (ex.containsKey("target")) state.extruder_target[i] = round(ex["target"].as<float>());
-            }
-        }
-
-        int activeIdx = 0;
-        if (state.active_extruder == "extruder1") activeIdx = 1;
-        else if (state.active_extruder == "extruder2") activeIdx = 2;
-        else if (state.active_extruder == "extruder3") activeIdx = 3;
-
-        state.nozzle_temper = state.extruder_temper[activeIdx];
-        state.nozzle_target_temper = state.extruder_target[activeIdx];
-        if (state.nozzle_target_temper == 0) {
-            for (int i = 0; i < 4; i++) {
-                if (state.extruder_target[i] > 0) {
-                    state.nozzle_temper = state.extruder_temper[i];
-                    state.nozzle_target_temper = state.extruder_target[i];
-                    break;
-                }
-            }
-        }
-
+        // Bed Temperature (Common to both)
         if (status.containsKey("heater_bed")) {
             JsonObject hb = status["heater_bed"];
             if (hb.containsKey("temperature")) state.bed_temper = round(hb["temperature"].as<float>());
             if (hb.containsKey("target")) state.bed_target_temper = round(hb["target"].as<float>());
         }
 
-        if (status.containsKey("temperature_sensor cavity")) {
-            JsonObject ct = status["temperature_sensor cavity"];
-            if (ct.containsKey("temperature")) state.chamber_temper = round(ct["temperature"].as<float>());
-        }
-
-        if (status.containsKey("temperature_sensor IR3_HOST")) {
-            JsonObject th = status["temperature_sensor IR3_HOST"];
-            if (th.containsKey("temperature")) state.host_temper = round(th["temperature"].as<float>());
-        } else if (status.containsKey("temperature_host IR3_HOST")) {
-            JsonObject th = status["temperature_host IR3_HOST"];
-            if (th.containsKey("temperature")) state.host_temper = round(th["temperature"].as<float>());
-        } else if (status.containsKey("temperature_sensor IR3_MCU")) {
-            JsonObject tm = status["temperature_sensor IR3_MCU"];
-            if (tm.containsKey("temperature")) state.host_temper = round(tm["temperature"].as<float>());
-        }
-
-        if (status.containsKey("probe")) {
-            JsonObject pb = status["probe"];
-            if (pb.containsKey("status")) state.probe_status = pb["status"].as<String>();
-        }
-
-        if (status.containsKey("machine_state_manager")) {
-            JsonObject msm = status["machine_state_manager"];
-            if (msm.containsKey("action_code")) state.action_code = msm["action_code"].as<int>();
-            if (msm.containsKey("main_state")) state.main_state = msm["main_state"].as<int>();
-        }
-
-        if (status.containsKey("auto_screws_tilt_adjust")) {
-            JsonObject asta = status["auto_screws_tilt_adjust"];
-            if (asta.containsKey("probe_step")) state.tilt_probe_step = asta["probe_step"].as<String>();
-            if (asta.containsKey("current_point") && state.bed_mesh_point == 0) state.bed_mesh_point = asta["current_point"].as<int>();
-        }
-
-        if (status.containsKey("bed_mesh")) {
-            JsonObject bm = status["bed_mesh"];
-            if (bm.containsKey("progress")) {
-                JsonObject prog = bm["progress"];
-                if (prog.containsKey("probe_state")) state.bed_mesh_state = prog["probe_state"].as<String>();
-                if (prog.containsKey("current_point")) state.bed_mesh_point = prog["current_point"].as<int>();
-                if (prog.containsKey("total_points")) state.bed_mesh_total = prog["total_points"].as<int>();
+        // =========================================================================
+        // ISOLATED PROFILE LOGIC (Ideaformer IR3 vs Snapmaker U1)
+        // =========================================================================
+        if (printer_profile == "ideaformer_ir3") {
+            // --- IDEA-FORMER IR3 V2: Single Extruder, Belt Klipper, Dynamic Host Sensors ---
+            if (status.containsKey("extruder")) {
+                JsonObject ex = status["extruder"];
+                if (ex.containsKey("temperature")) {
+                    state.extruder_temper[0] = round(ex["temperature"].as<float>());
+                    state.nozzle_temper = state.extruder_temper[0];
+                }
+                if (ex.containsKey("target")) {
+                    state.extruder_target[0] = round(ex["target"].as<float>());
+                    state.nozzle_target_temper = state.extruder_target[0];
+                }
             }
-        }
+            // Clear secondary extruders
+            for (int i = 1; i < 4; i++) {
+                state.extruder_temper[i] = 0;
+                state.extruder_target[i] = 0;
+            }
+            state.active_extruder = "extruder";
 
-        state.gcode_state = state.raw_gcode_state;
+            // No cavity/chamber on IR3
+            state.chamber_temper = 0;
 
-        // Probing / Leveling detection (Handles both pre-print routine and standalone bed leveling)
-        String bState = state.bed_mesh_state;
-        bState.toLowerCase();
-        String pStatus = state.probe_status;
-        pStatus.toLowerCase();
-        String tStep = state.tilt_probe_step;
-        tStep.toLowerCase();
-        String msgLower = state.message;
-        msgLower.toLowerCase();
-
-        bool is_probing = false;
-        // Snapmaker action_code 310..319 represents bed leveling / tilt routine
-        if ((state.action_code >= 310 && state.action_code <= 319) ||
-            bState == "probing" || bState == "start" || bState == "measuring" || bState == "calibrating" || bState == "preheat") {
-            is_probing = true;
-        } else if (state.bed_mesh_total > 0 && state.bed_mesh_point > 0 && state.bed_mesh_point < state.bed_mesh_total && 
-                   bState != "aborted" && bState != "finish" && bState != "ready" && bState != "idle") {
-            is_probing = true;
-        } else if (pStatus == "probing" || (tStep.length() > 0 && tStep != "adjust_idle" && tStep != "idle" && tStep != "ready")) {
-            is_probing = true;
-        } else if (msgLower.indexOf("leveling") >= 0 || msgLower.indexOf("bed_mesh") >= 0 || msgLower.indexOf("probe") >= 0 || msgLower.indexOf("調平") >= 0) {
-            is_probing = true;
-        }
-
-        // Flow calibration detection
-        // Snapmaker action_code 322 or 320..329 represents dynamic flow rate calibration/measurement
-        bool is_calib_flow = false;
-        if (state.action_code == 322 || (state.action_code >= 320 && state.action_code <= 329) ||
-            msgLower.indexOf("flow") >= 0 || (msgLower.indexOf("calibrat") >= 0 && msgLower.indexOf("extru") >= 0) || msgLower.indexOf("流量") >= 0) {
-            is_calib_flow = true;
-        }
-
-        // Apply state evaluation
-        if (is_probing && state.raw_gcode_state != "FAILED" && state.raw_gcode_state != "CANCELLED") {
-            state.gcode_state = "LEVELING";
-        } else if (is_calib_flow && state.raw_gcode_state != "FAILED" && state.raw_gcode_state != "CANCELLED") {
-            state.gcode_state = "CALIBRATING_FLOW";
-        } else if (state.gcode_state == "RUNNING") {
-            if (state.bed_target_temper > 0 && state.bed_temper < state.bed_target_temper - 2) {
-                state.gcode_state = "HEATING_BED";
-            } else if (state.nozzle_target_temper > 0 && state.nozzle_temper < state.nozzle_target_temper - 2) {
-                state.gcode_state = "HEATING_NOZZLE";
-            } else if (state.raw_print_duration == 0) {
-                state.gcode_state = "PREPARE";
+            // Dynamically scan any temperature_sensor or temperature_host
+            for (JsonPair kv : status) {
+                String k = kv.key().c_str();
+                if (k.startsWith("temperature_sensor") || k.startsWith("temperature_host")) {
+                    JsonObject sens = kv.value().as<JsonObject>();
+                    if (sens.containsKey("temperature")) {
+                        state.host_temper = round(sens["temperature"].as<float>());
+                    }
+                }
             }
 
-            // Estimate remaining time
-            if (state.metadata_estimated_time > 0) {
-                float prog = state.mc_percent / 100.0f;
-                float remSec = state.metadata_estimated_time * (1.0f - prog);
-                state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
-            } else if (state.mc_percent > 0 && state.raw_print_duration > 5) {
-                float totalSec = (float)state.raw_print_duration / (state.mc_percent / 100.0f);
-                float remSec = totalSec - state.raw_print_duration;
-                state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
-            } else {
-                state.mc_remaining_time = -1;
+            // Clear Snapmaker specific AMS / leveling data to prevent pollution
+            state.filament_state = "";
+            state.filament_message = "";
+            state.filament_extruder = "";
+            for (int i = 0; i < 4; i++) {
+                state.t_state[i] = "";
+                state.t_action[i] = "";
+                state.t_error[i] = "";
+                state.filament_loaded[i] = false;
             }
-        }
+            state.action_code = 0;
+            state.main_state = 0;
+            state.probe_status = "";
+            state.tilt_probe_step = "";
+            state.bed_mesh_state = "";
+            state.bed_mesh_point = 0;
+            state.bed_mesh_total = 0;
 
-        // Filament feed status (T1~T4)
-        if (status.containsKey("filament_feed left")) {
-            JsonObject ffl = status["filament_feed left"];
-            if (ffl.containsKey("extruder0")) {
-                if (ffl["extruder0"].containsKey("channel_state")) state.t_state[0] = ffl["extruder0"]["channel_state"].as<String>();
-                if (ffl["extruder0"].containsKey("channel_action_state")) state.t_action[0] = ffl["extruder0"]["channel_action_state"].as<String>();
-                if (ffl["extruder0"].containsKey("channel_error")) state.t_error[0] = ffl["extruder0"]["channel_error"].as<String>();
-            }
-            if (ffl.containsKey("extruder1")) {
-                if (ffl["extruder1"].containsKey("channel_state")) state.t_state[1] = ffl["extruder1"]["channel_state"].as<String>();
-                if (ffl["extruder1"].containsKey("channel_action_state")) state.t_action[1] = ffl["extruder1"]["channel_action_state"].as<String>();
-                if (ffl["extruder1"].containsKey("channel_error")) state.t_error[1] = ffl["extruder1"]["channel_error"].as<String>();
-            }
-        }
+            // State evaluation for Ideaformer
+            state.gcode_state = state.raw_gcode_state;
+            if (state.gcode_state == "RUNNING") {
+                if (state.bed_target_temper > 0 && state.bed_temper < state.bed_target_temper - 2) {
+                    state.gcode_state = "HEATING_BED";
+                } else if (state.nozzle_target_temper > 0 && state.nozzle_temper < state.nozzle_target_temper - 2) {
+                    state.gcode_state = "HEATING_NOZZLE";
+                } else if (state.raw_print_duration == 0) {
+                    state.gcode_state = "PREPARE";
+                }
 
-        if (status.containsKey("filament_feed right")) {
-            JsonObject ffr = status["filament_feed right"];
-            if (ffr.containsKey("extruder2")) {
-                if (ffr["extruder2"].containsKey("channel_state")) state.t_state[2] = ffr["extruder2"]["channel_state"].as<String>();
-                if (ffr["extruder2"].containsKey("channel_action_state")) state.t_action[2] = ffr["extruder2"]["channel_action_state"].as<String>();
-                if (ffr["extruder2"].containsKey("channel_error")) state.t_error[2] = ffr["extruder2"]["channel_error"].as<String>();
+                // Remaining time estimation
+                if (state.metadata_estimated_time > 0) {
+                    float prog = state.mc_percent / 100.0f;
+                    float remSec = state.metadata_estimated_time * (1.0f - prog);
+                    state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
+                } else if (state.mc_percent > 0 && state.raw_print_duration > 5) {
+                    float totalSec = (float)state.raw_print_duration / (state.mc_percent / 100.0f);
+                    float remSec = totalSec - state.raw_print_duration;
+                    state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
+                } else {
+                    state.mc_remaining_time = -1;
+                }
             }
-            if (ffr.containsKey("extruder3")) {
-                if (ffr["extruder3"].containsKey("channel_state")) state.t_state[3] = ffr["extruder3"]["channel_state"].as<String>();
-                if (ffr["extruder3"].containsKey("channel_action_state")) state.t_action[3] = ffr["extruder3"]["channel_action_state"].as<String>();
-                if (ffr["extruder3"].containsKey("channel_error")) state.t_error[3] = ffr["extruder3"]["channel_error"].as<String>();
+        } else {
+            // --- SNAPMAKER U1: 4 Extruders, Cavity, Feeders, Leveling ---
+            if (status.containsKey("toolhead")) {
+                JsonObject th = status["toolhead"];
+                if (th.containsKey("extruder")) {
+                    state.active_extruder = th["extruder"].as<String>();
+                }
             }
-        }
 
-        // Filament Colors & Task config (T1~T4 actual filament colors)
-        if (status.containsKey("print_task_config")) {
-            JsonObject ptc = status["print_task_config"];
-            if (ptc.containsKey("filament_color_rgba")) {
-                JsonArray arr = ptc["filament_color_rgba"];
-                for (size_t i = 0; i < 4 && i < arr.size(); i++) {
-                    String rgba = arr[i].as<String>();
-                    if (rgba.length() >= 6) {
-                        long hexVal = strtol(rgba.substring(0, 6).c_str(), NULL, 16);
-                        uint8_t r = (hexVal >> 16) & 0xFF;
-                        uint8_t g = (hexVal >> 8) & 0xFF;
-                        uint8_t b = hexVal & 0xFF;
-                        // Snapmaker palette calibration: map pinkish red preset (e.g. D81B60) to true vivid red
+            const char* extKeys[4] = {"extruder", "extruder1", "extruder2", "extruder3"};
+            for (int i = 0; i < 4; i++) {
+                if (status.containsKey(extKeys[i])) {
+                    JsonObject ex = status[extKeys[i]];
+                    if (ex.containsKey("temperature")) state.extruder_temper[i] = round(ex["temperature"].as<float>());
+                    if (ex.containsKey("target")) state.extruder_target[i] = round(ex["target"].as<float>());
+                }
+            }
+
+            int activeIdx = 0;
+            if (state.active_extruder == "extruder1") activeIdx = 1;
+            else if (state.active_extruder == "extruder2") activeIdx = 2;
+            else if (state.active_extruder == "extruder3") activeIdx = 3;
+
+            state.nozzle_temper = state.extruder_temper[activeIdx];
+            state.nozzle_target_temper = state.extruder_target[activeIdx];
+            if (state.nozzle_target_temper == 0) {
+                for (int i = 0; i < 4; i++) {
+                    if (state.extruder_target[i] > 0) {
+                        state.nozzle_temper = state.extruder_temper[i];
+                        state.nozzle_target_temper = state.extruder_target[i];
+                        break;
+                    }
+                }
+            }
+
+            if (status.containsKey("temperature_sensor cavity")) {
+                JsonObject ct = status["temperature_sensor cavity"];
+                if (ct.containsKey("temperature")) state.chamber_temper = round(ct["temperature"].as<float>());
+            }
+
+            if (status.containsKey("probe")) {
+                JsonObject pb = status["probe"];
+                if (pb.containsKey("status")) state.probe_status = pb["status"].as<String>();
+            }
+
+            if (status.containsKey("machine_state_manager")) {
+                JsonObject msm = status["machine_state_manager"];
+                if (msm.containsKey("action_code")) state.action_code = msm["action_code"].as<int>();
+                if (msm.containsKey("main_state")) state.main_state = msm["main_state"].as<int>();
+            }
+
+            if (status.containsKey("auto_screws_tilt_adjust")) {
+                JsonObject asta = status["auto_screws_tilt_adjust"];
+                if (asta.containsKey("probe_step")) state.tilt_probe_step = asta["probe_step"].as<String>();
+                if (asta.containsKey("current_point") && state.bed_mesh_point == 0) state.bed_mesh_point = asta["current_point"].as<int>();
+            }
+
+            if (status.containsKey("bed_mesh")) {
+                JsonObject bm = status["bed_mesh"];
+                if (bm.containsKey("progress")) {
+                    JsonObject prog = bm["progress"];
+                    if (prog.containsKey("probe_state")) state.bed_mesh_state = prog["probe_state"].as<String>();
+                    if (prog.containsKey("current_point")) state.bed_mesh_point = prog["current_point"].as<int>();
+                    if (prog.containsKey("total_points")) state.bed_mesh_total = prog["total_points"].as<int>();
+                }
+            }
+
+            state.gcode_state = state.raw_gcode_state;
+
+            // Probing / Leveling detection
+            String bState = state.bed_mesh_state;
+            bState.toLowerCase();
+            String pStatus = state.probe_status;
+            pStatus.toLowerCase();
+            String tStep = state.tilt_probe_step;
+            tStep.toLowerCase();
+            String msgLower = state.message;
+            msgLower.toLowerCase();
+
+            bool is_probing = false;
+            if ((state.action_code >= 310 && state.action_code <= 319) ||
+                bState == "probing" || bState == "start" || bState == "measuring" || bState == "calibrating" || bState == "preheat") {
+                is_probing = true;
+            } else if (state.bed_mesh_total > 0 && state.bed_mesh_point > 0 && state.bed_mesh_point < state.bed_mesh_total && 
+                       bState != "aborted" && bState != "finish" && bState != "ready" && bState != "idle") {
+                is_probing = true;
+            } else if (pStatus == "probing" || (tStep.length() > 0 && tStep != "adjust_idle" && tStep != "idle" && tStep != "ready")) {
+                is_probing = true;
+            } else if (msgLower.indexOf("leveling") >= 0 || msgLower.indexOf("bed_mesh") >= 0 || msgLower.indexOf("probe") >= 0 || msgLower.indexOf("調平") >= 0) {
+                is_probing = true;
+            }
+
+            // Flow calibration detection
+            bool is_calib_flow = false;
+            if (state.action_code == 322 || (state.action_code >= 320 && state.action_code <= 329) ||
+                msgLower.indexOf("flow") >= 0 || (msgLower.indexOf("calibrat") >= 0 && msgLower.indexOf("extru") >= 0) || msgLower.indexOf("流量") >= 0) {
+                is_calib_flow = true;
+            }
+
+            if (is_probing && state.raw_gcode_state != "FAILED" && state.raw_gcode_state != "CANCELLED") {
+                state.gcode_state = "LEVELING";
+            } else if (is_calib_flow && state.raw_gcode_state != "FAILED" && state.raw_gcode_state != "CANCELLED") {
+                state.gcode_state = "CALIBRATING_FLOW";
+            } else if (state.gcode_state == "RUNNING") {
+                if (state.bed_target_temper > 0 && state.bed_temper < state.bed_target_temper - 2) {
+                    state.gcode_state = "HEATING_BED";
+                } else if (state.nozzle_target_temper > 0 && state.nozzle_temper < state.nozzle_target_temper - 2) {
+                    state.gcode_state = "HEATING_NOZZLE";
+                } else if (state.raw_print_duration == 0) {
+                    state.gcode_state = "PREPARE";
+                }
+
+                // Estimate remaining time
+                if (state.metadata_estimated_time > 0) {
+                    float prog = state.mc_percent / 100.0f;
+                    float remSec = state.metadata_estimated_time * (1.0f - prog);
+                    state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
+                } else if (state.mc_percent > 0 && state.raw_print_duration > 5) {
+                    float totalSec = (float)state.raw_print_duration / (state.mc_percent / 100.0f);
+                    float remSec = totalSec - state.raw_print_duration;
+                    state.mc_remaining_time = (int)((remSec + 59.0f) / 60.0f);
+                } else {
+                    state.mc_remaining_time = -1;
+                }
+            }
+
+            // Filament feed status (T1~T4)
+            if (status.containsKey("filament_feed left")) {
+                JsonObject ffl = status["filament_feed left"];
+                if (ffl.containsKey("extruder0")) {
+                    if (ffl["extruder0"].containsKey("channel_state")) state.t_state[0] = ffl["extruder0"]["channel_state"].as<String>();
+                    if (ffl["extruder0"].containsKey("channel_action_state")) state.t_action[0] = ffl["extruder0"]["channel_action_state"].as<String>();
+                    if (ffl["extruder0"].containsKey("channel_error")) state.t_error[0] = ffl["extruder0"]["channel_error"].as<String>();
+                }
+                if (ffl.containsKey("extruder1")) {
+                    if (ffl["extruder1"].containsKey("channel_state")) state.t_state[1] = ffl["extruder1"]["channel_state"].as<String>();
+                    if (ffl["extruder1"].containsKey("channel_action_state")) state.t_action[1] = ffl["extruder1"]["channel_action_state"].as<String>();
+                    if (ffl["extruder1"].containsKey("channel_error")) state.t_error[1] = ffl["extruder1"]["channel_error"].as<String>();
+                }
+            }
+
+            if (status.containsKey("filament_feed right")) {
+                JsonObject ffr = status["filament_feed right"];
+                if (ffr.containsKey("extruder2")) {
+                    if (ffr["extruder2"].containsKey("channel_state")) state.t_state[2] = ffr["extruder2"]["channel_state"].as<String>();
+                    if (ffr["extruder2"].containsKey("channel_action_state")) state.t_action[2] = ffr["extruder2"]["channel_action_state"].as<String>();
+                    if (ffr["extruder2"].containsKey("channel_error")) state.t_error[2] = ffr["extruder2"]["channel_error"].as<String>();
+                }
+                if (ffr.containsKey("extruder3")) {
+                    if (ffr["extruder3"].containsKey("channel_state")) state.t_state[3] = ffr["extruder3"]["channel_state"].as<String>();
+                    if (ffr["extruder3"].containsKey("channel_action_state")) state.t_action[3] = ffr["extruder3"]["channel_action_state"].as<String>();
+                    if (ffr["extruder3"].containsKey("channel_error")) state.t_error[3] = ffr["extruder3"]["channel_error"].as<String>();
+                }
+            }
+
+            // Filament Colors & Task config
+            if (status.containsKey("print_task_config")) {
+                JsonObject ptc = status["print_task_config"];
+                if (ptc.containsKey("filament_color_rgba")) {
+                    JsonArray arr = ptc["filament_color_rgba"];
+                    for (size_t i = 0; i < 4 && i < arr.size(); i++) {
+                        String rgba = arr[i].as<String>();
+                        if (rgba.length() >= 6) {
+                            long hexVal = strtol(rgba.substring(0, 6).c_str(), NULL, 16);
+                            uint8_t r = (hexVal >> 16) & 0xFF;
+                            uint8_t g = (hexVal >> 8) & 0xFF;
+                            uint8_t b = hexVal & 0xFF;
+                            if (r > 180 && g < 70 && b > 40 && b < 130) {
+                                r = 235; g = 25; b = 25;
+                            }
+                            state.filament_rgb[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+                        }
+                    }
+                } else if (ptc.containsKey("filament_color")) {
+                    JsonArray arr = ptc["filament_color"];
+                    for (size_t i = 0; i < 4 && i < arr.size(); i++) {
+                        uint32_t c = arr[i].as<uint32_t>();
+                        uint8_t r = (c >> 16) & 0xFF;
+                        uint8_t g = (c >> 8) & 0xFF;
+                        uint8_t b = c & 0xFF;
                         if (r > 180 && g < 70 && b > 40 && b < 130) {
                             r = 235; g = 25; b = 25;
                         }
                         state.filament_rgb[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
                     }
                 }
-            } else if (ptc.containsKey("filament_color")) {
-                JsonArray arr = ptc["filament_color"];
-                for (size_t i = 0; i < 4 && i < arr.size(); i++) {
-                    uint32_t c = arr[i].as<uint32_t>();
-                    uint8_t r = (c >> 16) & 0xFF;
-                    uint8_t g = (c >> 8) & 0xFF;
-                    uint8_t b = c & 0xFF;
-                    if (r > 180 && g < 70 && b > 40 && b < 130) {
-                        r = 235; g = 25; b = 25;
+                if (ptc.containsKey("filament_exist")) {
+                    JsonArray arr = ptc["filament_exist"];
+                    for (size_t i = 0; i < 4 && i < arr.size(); i++) {
+                        state.filament_loaded[i] = arr[i].as<bool>();
                     }
-                    state.filament_rgb[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+                }
+                if (ptc.containsKey("filament_type")) {
+                    JsonArray arr = ptc["filament_type"];
+                    for (size_t i = 0; i < 4 && i < arr.size(); i++) {
+                        state.filament_type[i] = arr[i].as<String>();
+                    }
                 }
             }
-            if (ptc.containsKey("filament_exist")) {
-                JsonArray arr = ptc["filament_exist"];
-                for (size_t i = 0; i < 4 && i < arr.size(); i++) {
-                    state.filament_loaded[i] = arr[i].as<bool>();
-                }
-            }
-            if (ptc.containsKey("filament_type")) {
-                JsonArray arr = ptc["filament_type"];
-                for (size_t i = 0; i < 4 && i < arr.size(); i++) {
-                    state.filament_type[i] = arr[i].as<String>();
-                }
-            }
-        }
 
-        // Determine if any active loading/unloading
-        state.filament_state = "";
-        for (int i = 0; i < 4; i++) {
-            String s = state.t_state[i];
-            String a = state.t_action[i];
-            String extName = "T" + String(i + 1);
-
-            if ((s == "load_fail" || s == "unload_fail" || a == "load_fail" || a == "unload_fail") &&
-                state.t_error[i] != "ok" && state.t_error[i] != "none" && state.t_error[i].length() > 0) {
-                state.filament_state = "ERROR";
-                state.filament_extruder = extName;
-                state.filament_message = extName + " - " + state.t_error[i];
-                state.filament_message.toUpperCase();
-                break;
-            }
-
-            // Only trigger if actively loading/unloading (exclude completed states like "load_finish", "unload_finish", "none", "")
-            bool is_unloading = (s == "unloading" || s == "pre_unload" || a == "unloading" || a == "pre_unload" || 
-                                ((s.indexOf("unload") >= 0) && (s.indexOf("finish") < 0)) || 
-                                ((a.indexOf("unload") >= 0) && (a.indexOf("finish") < 0)));
-            bool is_loading = !is_unloading && (s == "loading" || s == "pre_load" || a == "loading" || a == "pre_load" || 
-                                ((s.indexOf("load") >= 0) && (s.indexOf("finish") < 0)) || 
-                                ((a.indexOf("load") >= 0) && (a.indexOf("finish") < 0)));
-
-            if (is_unloading) {
-                state.filament_state = "UNLOADING";
-                state.filament_extruder = extName;
-                state.filament_message = extName + " - UNLOADING";
-                break;
-            } else if (is_loading) {
-                state.filament_state = "LOADING";
-                state.filament_extruder = extName;
-                state.filament_message = extName + " - LOADING";
-                break;
-            }
-        }
-
-        if (state.gcode_state == "RUNNING") {
+            // Determine if any active loading/unloading
             state.filament_state = "";
+            for (int i = 0; i < 4; i++) {
+                String s = state.t_state[i];
+                String a = state.t_action[i];
+                String extName = "T" + String(i + 1);
+
+                if ((s == "load_fail" || s == "unload_fail" || a == "load_fail" || a == "unload_fail") &&
+                    state.t_error[i] != "ok" && state.t_error[i] != "none" && state.t_error[i].length() > 0) {
+                    state.filament_state = "ERROR";
+                    state.filament_extruder = extName;
+                    state.filament_message = extName + " - " + state.t_error[i];
+                    state.filament_message.toUpperCase();
+                    break;
+                }
+
+                bool is_unloading = (s == "unloading" || s == "pre_unload" || a == "unloading" || a == "pre_unload" || 
+                                    ((s.indexOf("unload") >= 0) && (s.indexOf("finish") < 0)) || 
+                                    ((a.indexOf("unload") >= 0) && (a.indexOf("finish") < 0)));
+                bool is_loading = !is_unloading && (s == "loading" || s == "pre_load" || a == "loading" || a == "pre_load" || 
+                                    ((s.indexOf("load") >= 0) && (s.indexOf("finish") < 0)) || 
+                                    ((a.indexOf("load") >= 0) && (a.indexOf("finish") < 0)));
+
+                if (is_unloading) {
+                    state.filament_state = "UNLOADING";
+                    state.filament_extruder = extName;
+                    state.filament_message = extName + " - UNLOADING";
+                    break;
+                } else if (is_loading) {
+                    state.filament_state = "LOADING";
+                    state.filament_extruder = extName;
+                    state.filament_message = extName + " - LOADING";
+                    break;
+                }
+            }
+
+            if (state.gcode_state == "RUNNING") {
+                state.filament_state = "";
+            }
         }
 
         xSemaphoreGive(mutex);

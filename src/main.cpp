@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <ElegantOTA.h>
 #include <time.h>
+#include <vector>
 #include "DisplayDriver.h"
 #include "VirtualMatrix.h"
 #include "MoonrakerClient.h"
@@ -145,14 +146,44 @@ void drawNozzle(int center_x) {
 }
 
 void drawLeveling(int center_x) {
-    uint16_t blue = matrix.Color(0, 128, 255);
-    uint16_t green = matrix.Color(0, 255, 0);
-    uint16_t dark_gray = matrix.Color(50, 50, 50);
-    
-    matrix.drawLine(center_x - 4, 7, center_x + 4, 7, dark_gray);
-    int probe_x = center_x - 3 + ((millis() / 400) % 7);
-    matrix.drawLine(probe_x, 1, probe_x, 5, blue);
-    matrix.drawPixel(probe_x, 6, green);
+    uint16_t bed_col = matrix.Color(40, 50, 65);
+    uint16_t bed_touch = matrix.Color(0, 220, 255);
+    uint16_t body_col = matrix.Color(0, 140, 255);
+    uint16_t needle_col = matrix.Color(160, 200, 255);
+    uint16_t tap_col = matrix.Color(255, 60, 60);    // 觸碰熱床時亮紅 (如 BLTouch 探針觸發)
+    uint16_t ready_col = matrix.Color(0, 255, 120);  // 抬起移動時亮綠
+
+    // 1. 熱床底線 (Y=7)
+    matrix.drawLine(center_x - 4, 7, center_x + 4, 7, bed_col);
+
+    // 2. 往返平移循環：由左到右 (0..6)，跳完後由右到左 (5..1)，共 12 步往返循環
+    const int step_duration = 260; // 每個探測點停留 260ms
+    unsigned long now = millis();
+    int cycle_step = (now / step_duration) % 12;
+    int pt_idx = (cycle_step <= 6) ? cycle_step : (12 - cycle_step);
+    int probe_x = center_x - 3 + pt_idx;
+
+    // 3. 指針上下跳動探測：
+    // 前段抬起 (0~60ms) -> 中段下跳觸碰 (60~190ms) -> 後段收回抬起 (190~260ms)
+    int step_phase = now % step_duration;
+    bool is_down = (step_phase >= 60 && step_phase < 190);
+
+    // 4. 探針本體固定座 (Y=0..2)
+    matrix.drawLine(probe_x, 0, probe_x, 2, body_col);
+    if (probe_x > 0) matrix.drawPixel(probe_x - 1, 1, body_col);
+    if (probe_x < MATRIX_WIDTH - 1) matrix.drawPixel(probe_x + 1, 1, body_col);
+
+    // 5. 活動指針上下跳動
+    if (is_down) {
+        // 向下探測：針身伸長至 Y=5，針尖下壓至 Y=6 觸碰熱床
+        matrix.drawLine(probe_x, 3, probe_x, 5, needle_col);
+        matrix.drawPixel(probe_x, 6, tap_col);
+        matrix.drawPixel(probe_x, 7, bed_touch); // 熱床被觸摸點亮起感應光
+    } else {
+        // 向上縮回：針尖收回至 Y=4 綠燈準備平移
+        matrix.drawPixel(probe_x, 3, needle_col);
+        matrix.drawPixel(probe_x, 4, ready_col);
+    }
 }
 
 void drawFlowCalibration(int center_x) {
@@ -338,7 +369,14 @@ void refreshDisplayText(const PrinterState& pState) {
         display_text.toUpperCase();
     } else if (pState.gcode_state == "RUNNING") {
         String time_str = (pState.mc_remaining_time < 0) ? "ESTIMATING" : (format_time_ascii(pState.mc_remaining_time) + " LEFT");
-        display_text = "PRINTING: " + String(pState.mc_percent) + "% - " + time_str + " - LAYER " + String(pState.layer_num) + "/" + String(pState.total_layer_num) + " - BED: " + String(pState.bed_temper) + "C - NOZZLE: " + String(pState.nozzle_temper) + "C";
+        if (printer_model == "ideaformer_ir3") {
+            String info_str = (pState.total_layer_num > 0) ? 
+                ("LAYER " + String(pState.layer_num) + "/" + String(pState.total_layer_num)) : 
+                ("FILAMENT: " + String(pState.filament_used_m, 1) + "m");
+            display_text = "PRINTING: " + String(pState.mc_percent) + "% - " + time_str + " - " + info_str + " - BED: " + String(pState.bed_temper) + "C - NOZZLE: " + String(pState.nozzle_temper) + "C";
+        } else {
+            display_text = "PRINTING: " + String(pState.mc_percent) + "% - " + time_str + " - LAYER " + String(pState.layer_num) + "/" + String(pState.total_layer_num) + " - BED: " + String(pState.bed_temper) + "C - NOZZLE: " + String(pState.nozzle_temper) + "C";
+        }
     } else if (pState.gcode_state == "PREPARE") {
         display_text = "PREPARING TO PRINT";
     } else if (pState.gcode_state == "HEATING_BED") {
@@ -429,33 +467,52 @@ void drawMatrixContent(const PrinterState& pState) {
         time(&now);
         struct tm * timeinfo = localtime(&now);
         
-        char hour_str[4];
-        char min_str[4];
-        strftime(hour_str, sizeof(hour_str), "%H", timeinfo);
-        strftime(min_str, sizeof(min_str), "%M", timeinfo);
-        
         matrix.fillScreen(0);
         uint16_t active_bg_color = bg_enabled ? scaleColor(current_bg_color, bg_brightness) : 0;
-        matrix.fillRect(0, 0, MATRIX_WIDTH, 7, active_bg_color);
+        matrix.fillRect(0, 0, MATRIX_WIDTH, 8, active_bg_color);
         
-        // Static centered 24-hour time on the 32x8 matrix (NO SCROLLING!)
+        // Static perfectly centered bold modern 24-hour clock (26 dots wide, 3 dots margins)
         uint16_t t_col = scaleColor(0xFFFFFF, text_brightness);
-        matrix.setTextColor(t_col);
-        
-        // Hour (2 chars: 2*6 = 12px) at X = 2
-        matrix.setCursor(2, 0);
-        matrix.print(hour_str);
-        
-        // Blinking Colon (Slower, gentle cadence: 1 sec ON / 1 sec OFF)
         bool colon_on = ((millis() / 1000) % 2 == 0);
-        if (colon_on) {
-            matrix.setCursor(14, 0);
-            matrix.print(":");
+        matrix.drawClockTime(timeinfo->tm_hour, timeinfo->tm_min, colon_on, t_col, 0);
+
+        // Weekday Accumulative Indicators on Leftmost (X=0) & Rightmost (X=31) Columns
+        // Mon -> Row 0 (Y=0), Tue -> Row 0..1, ..., Sun -> Row 0..6. Resets on Monday.
+        // Thursday (Row 3): 2 horizontal dots (X=0,1 and X=30,31)
+        // Colorful Spectrum: Mon(Sky), Tue(Cyan), Wed(Green), Thu(Gold), Fri(Orange), Sat(Pink/Purple), Sun(Red)
+        static const uint32_t wday_palette[7] = {
+            0x38BDF8, // 星期一: 科技天藍
+            0x06B6D4, // 星期二: 電光水青
+            0x10B981, // 星期三: 翡翠翠綠
+            0xFACC15, // 星期四: 璀璨金黃 (雙燈)
+            0xFB923C, // 星期五: 晚霞烈橙
+            0xE879F9, // 星期六: 霓虹紫粉
+            0xF87171  // 星期日: 經典假日紅
+        };
+
+        int current_wday_idx = (timeinfo->tm_wday == 0) ? 6 : (timeinfo->tm_wday - 1);
+        for (int row = 0; row <= current_wday_idx; row++) {
+            uint16_t row_col = scaleColor(wday_palette[row], text_brightness);
+            if (row == 3) { // 星期四 (第 4 列 Y=3)：橫向兩顆
+                matrix.drawPixel(0, 3, row_col);
+                matrix.drawPixel(1, 3, row_col);
+                matrix.drawPixel(MATRIX_WIDTH - 2, 3, row_col); // X=30
+                matrix.drawPixel(MATRIX_WIDTH - 1, 3, row_col); // X=31
+            } else {
+                matrix.drawPixel(0, row, row_col);
+                matrix.drawPixel(MATRIX_WIDTH - 1, row, row_col);
+            }
         }
-        
-        // Minute (2 chars: 2*6 = 12px) at X = 19
-        matrix.setCursor(19, 0);
-        matrix.print(min_str);
+
+        // Bottom row (Y=7): 60-Second LED Progress Bar (Right-to-Left, 0 to 32 dots)
+        int sec = timeinfo->tm_sec;
+        int dots = ((sec + 1) * MATRIX_WIDTH) / 60;
+        uint16_t sec_bar_col = scaleColor(0x0284C7, text_brightness); // 科技藍本體
+        uint16_t sec_head_col = scaleColor(0x38BDF8, text_brightness); // 前緣光標亮點
+        for (int i = 0; i < dots && i < MATRIX_WIDTH; i++) {
+            int x = MATRIX_WIDTH - 1 - i;
+            matrix.drawPixel(x, 7, (i == dots - 1) ? sec_head_col : sec_bar_col);
+        }
         return;
     }
 
@@ -594,6 +651,65 @@ void drawMatrixContent(const PrinterState& pState) {
     }
 }
 
+// 輔助函數：帶字距（Tracking / Letter-spacing）的置中文字繪製，防止中文字體粘連
+static void drawSpacedStringCenter(LGFX& gfx, const String& str, int32_t cx, int32_t cy, int32_t letter_spacing = 6) {
+    std::vector<String> chars;
+    const char* p = str.c_str();
+    while (*p) {
+        int len = 1;
+        unsigned char c = (unsigned char)*p;
+        if ((c & 0x80) == 0) len = 1;
+        else if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        chars.push_back(String(p).substring(0, len));
+        p += len;
+    }
+    if (chars.empty()) return;
+
+    int32_t total_w = 0;
+    std::vector<int32_t> widths;
+    for (const auto& ch : chars) {
+        int32_t w = gfx.textWidth(ch.c_str());
+        widths.push_back(w);
+        total_w += w;
+    }
+    total_w += (int32_t)(chars.size() - 1) * letter_spacing;
+
+    int32_t cur_x = cx - total_w / 2;
+    textdatum_t old_datum = gfx.getTextDatum();
+    gfx.setTextDatum(textdatum_t::middle_left);
+    for (size_t i = 0; i < chars.size(); ++i) {
+        gfx.drawString(chars[i], cur_x, cy);
+        cur_x += widths[i] + letter_spacing;
+    }
+    gfx.setTextDatum(old_datum);
+}
+
+// 輔助函數：帶字距的左對齊文字繪製
+static void drawSpacedStringLeft(LGFX& gfx, const String& str, int32_t x, int32_t y, int32_t letter_spacing = 4) {
+    std::vector<String> chars;
+    const char* p = str.c_str();
+    while (*p) {
+        int len = 1;
+        unsigned char c = (unsigned char)*p;
+        if ((c & 0x80) == 0) len = 1;
+        else if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        chars.push_back(String(p).substring(0, len));
+        p += len;
+    }
+    int32_t cur_x = x;
+    textdatum_t old_datum = gfx.getTextDatum();
+    gfx.setTextDatum(textdatum_t::top_left);
+    for (size_t i = 0; i < chars.size(); ++i) {
+        gfx.drawString(chars[i], cur_x, y);
+        cur_x += gfx.textWidth(chars[i].c_str()) + letter_spacing;
+    }
+    gfx.setTextDatum(old_datum);
+}
+
 void drawDashboardStatic() {
     uint16_t bg = lcd.color565(12, 16, 24);
     uint16_t header_bg = lcd.color565(18, 24, 38);
@@ -611,7 +727,7 @@ void drawDashboardStatic() {
     lcd.setTextPadding(0);
     lcd.setTextColor(TFT_CYAN, header_bg);
     lcd.setCursor(20, 16);
-    lcd.print("SnapMatrix 智慧面板 v1.1");
+    lcd.print("SnapMatrix 智慧面板 v1.3");
 
     // BOTTOM METRICS CARDS (Y=280 to 460)
     int cardY = 280;
@@ -625,8 +741,7 @@ void drawDashboardStatic() {
     lcd.setTextSize(1);
     lcd.setTextPadding(0);
     lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
-    lcd.setCursor(28, cardY + 10);
-    lcd.print("列印進度");
+    drawSpacedStringLeft(lcd, "列印進度", 28, cardY + 10, 4);
 
     // Card 2: Temperatures (X=272, W=240)
     lcd.fillRoundRect(272, cardY, 240, cardH, 12, card_bg);
@@ -636,8 +751,7 @@ void drawDashboardStatic() {
     lcd.setTextSize(1);
     lcd.setTextPadding(0);
     lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
-    lcd.setCursor(284, cardY + 10);
-    lcd.print("溫度監控");
+    drawSpacedStringLeft(lcd, "溫度監控", 284, cardY + 10, 4);
 
     // Card 3: Print Job & Extruders (X=528, W=256)
     lcd.fillRoundRect(528, cardY, 256, cardH, 12, card_bg);
@@ -647,8 +761,7 @@ void drawDashboardStatic() {
     lcd.setTextSize(1);
     lcd.setTextPadding(0);
     lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
-    lcd.setCursor(540, cardY + 10);
-    lcd.print(printer_model == "ideaformer_ir3" ? "任務與進度" : "任務與層數");
+    drawSpacedStringLeft(lcd, printer_model == "ideaformer_ir3" ? "任務與進度" : "任務與層數", 540, cardY + 10, 4);
 
     // Initial Matrix Render
     matrix.renderToLGFX(&lcd, 16, 65, 24, 9, true);
@@ -660,50 +773,75 @@ void drawDashboardStatic() {
 void drawWeatherIconLarge(int cx, int cy, int code) {
     if (code >= 95) {
         // Thunderstorm (雷雨)
-        lcd.fillCircle(cx - 14, cy - 8, 16, lcd.color565(120, 140, 170));
-        lcd.fillCircle(cx + 14, cy - 4, 20, lcd.color565(150, 170, 200));
-        lcd.fillCircle(cx - 3, cy + 4, 18, lcd.color565(100, 120, 150));
-        lcd.fillRect(cx - 26, cy + 4, 52, 16, lcd.color565(100, 120, 150));
-        // Lightning bolt ⚡
-        uint16_t yellow = lcd.color565(255, 225, 0);
-        lcd.fillTriangle(cx - 4, cy + 8, cx + 10, cy + 8, cx - 2, cy + 22, yellow);
-        lcd.fillTriangle(cx + 2, cy + 20, cx + 10, cy + 20, cx - 6, cy + 40, yellow);
-    } else if (code >= 51 && code <= 82) {
-        // Rain (下雨 / 毛毛雨)
-        lcd.fillCircle(cx - 14, cy - 8, 16, lcd.color565(130, 150, 180));
-        lcd.fillCircle(cx + 14, cy - 4, 20, lcd.color565(160, 180, 210));
-        lcd.fillCircle(cx - 3, cy + 4, 18, lcd.color565(110, 130, 160));
-        lcd.fillRect(cx - 26, cy + 4, 52, 16, lcd.color565(110, 130, 160));
+        // Dark Thunder Cloud
+        lcd.fillSmoothRoundRect(cx - 24, cy - 10, 50, 18, 9, lcd.color565(60, 75, 100));
+        lcd.fillSmoothCircle(cx - 8, cy - 12, 15, lcd.color565(60, 75, 100));
+        lcd.fillSmoothRoundRect(cx - 26, cy + 2, 54, 20, 10, lcd.color565(130, 150, 180));
+        lcd.fillSmoothCircle(cx - 12, cy + 2, 15, lcd.color565(130, 150, 180));
+        lcd.fillSmoothCircle(cx + 4, cy - 5, 18, lcd.color565(160, 180, 210));
+        lcd.fillSmoothCircle(cx + 18, cy + 4, 13, lcd.color565(130, 150, 180));
         // Raindrops
-        uint16_t blue = lcd.color565(50, 180, 255);
-        lcd.fillRoundRect(cx - 16, cy + 24, 4, 10, 2, blue);
-        lcd.fillRoundRect(cx - 2, cy + 28, 4, 10, 2, blue);
-        lcd.fillRoundRect(cx + 12, cy + 22, 4, 10, 2, blue);
+        uint16_t rain_col = lcd.color565(34, 211, 238);
+        lcd.fillSmoothRoundRect(cx - 18, cy + 24, 4, 12, 2, rain_col);
+        lcd.fillSmoothRoundRect(cx + 16, cy + 24, 4, 12, 2, rain_col);
+        // Smooth Lightning Bolt ⚡
+        uint16_t bolt = lcd.color565(255, 230, 0);
+        lcd.fillTriangle(cx - 4, cy + 12, cx + 10, cy + 12, cx - 2, cy + 24, bolt);
+        lcd.fillTriangle(cx + 1, cy + 22, cx + 9, cy + 22, cx - 6, cy + 40, bolt);
+    } else if (code >= 51 && code <= 82) {
+        // Rain (下雨 / 毛毛雨 / 陣雨) - Layered Smooth Clouds + Raindrops
+        // Background shadow cloud
+        lcd.fillSmoothRoundRect(cx - 22, cy - 10, 48, 18, 9, lcd.color565(75, 100, 135));
+        lcd.fillSmoothCircle(cx - 6, cy - 12, 15, lcd.color565(75, 100, 135));
+        lcd.fillSmoothCircle(cx + 12, cy - 9, 13, lcd.color565(75, 100, 135));
+        // Foreground soft cloud
+        lcd.fillSmoothRoundRect(cx - 26, cy + 2, 54, 20, 10, lcd.color565(175, 205, 240));
+        lcd.fillSmoothCircle(cx - 12, cy + 2, 15, lcd.color565(175, 205, 240));
+        lcd.fillSmoothCircle(cx + 4, cy - 5, 18, lcd.color565(220, 238, 255));
+        lcd.fillSmoothCircle(cx + 18, cy + 4, 13, lcd.color565(175, 205, 240));
+        // 3 Capsule-shaped Raindrops
+        uint16_t rain_col = lcd.color565(34, 211, 238);
+        lcd.fillSmoothRoundRect(cx - 15, cy + 24, 4, 13, 2, rain_col);
+        lcd.fillSmoothRoundRect(cx, cy + 27, 4, 15, 2, rain_col);
+        lcd.fillSmoothRoundRect(cx + 15, cy + 23, 4, 13, 2, rain_col);
     } else if (code <= 1) {
-        // Sun (晴天)
-        uint16_t gold = lcd.color565(255, 195, 0);
-        uint16_t orange = lcd.color565(255, 120, 0);
-        lcd.fillCircle(cx, cy + 6, 20, gold);
-        // Sun rays
+        // Sun (晴天) - Warm glowing sun with smooth radiating corona dots
+        lcd.fillSmoothCircle(cx, cy, 26, lcd.color565(255, 160, 0));
+        lcd.fillSmoothCircle(cx, cy, 20, lcd.color565(255, 225, 40));
+        // Smooth circular corona beacons
         for (int i = 0; i < 8; i++) {
-            float angle = i * (3.14159f / 4.0f);
-            int x1 = cx + cos(angle) * 24;
-            int y1 = cy + 6 + sin(angle) * 24;
-            int x2 = cx + cos(angle) * 34;
-            int y2 = cy + 6 + sin(angle) * 34;
-            lcd.drawLine(x1, y1, x2, y2, orange);
-            lcd.drawLine(x1 + 1, y1, x2 + 1, y2, orange);
+            float a = i * (3.14159265f / 4.0f);
+            int sx = cx + (int)round(cos(a) * 31);
+            int sy = cy + (int)round(sin(a) * 31);
+            lcd.fillSmoothCircle(sx, sy, 3, lcd.color565(255, 205, 30));
         }
     } else {
-        // Cloud (多雲 / 陰天)
-        lcd.fillCircle(cx - 15, cy - 6, 18, lcd.color565(160, 190, 230));
-        lcd.fillCircle(cx + 15, cy - 2, 22, lcd.color565(200, 225, 255));
-        lcd.fillCircle(cx - 4, cy + 6, 20, lcd.color565(140, 170, 210));
-        lcd.fillRect(cx - 28, cy + 8, 58, 18, lcd.color565(140, 170, 210));
+        // Cloud (多雲 / 陰天) - 3D Layered Smooth Fluffy Clouds
+        // Back cloud
+        lcd.fillSmoothRoundRect(cx - 20, cy - 10, 48, 20, 10, lcd.color565(90, 115, 150));
+        lcd.fillSmoothCircle(cx - 6, cy - 12, 16, lcd.color565(90, 115, 150));
+        lcd.fillSmoothCircle(cx + 12, cy - 10, 14, lcd.color565(90, 115, 150));
+        // Front cloud
+        lcd.fillSmoothRoundRect(cx - 26, cy + 4, 54, 22, 11, lcd.color565(190, 215, 245));
+        lcd.fillSmoothCircle(cx - 12, cy + 4, 16, lcd.color565(190, 215, 245));
+        lcd.fillSmoothCircle(cx + 4, cy - 3, 19, lcd.color565(235, 245, 255));
+        lcd.fillSmoothCircle(cx + 18, cy + 6, 13, lcd.color565(190, 215, 245));
     }
 }
 
-void renderStandbyUI() {
+// 輔助函數：以微像素多重對稱膨脹繪製，使向量字體筆劃厚度顯著加粗，呈現 ExtraBold / Heavy 粗壯質感
+static void drawHeavyString(LGFX& gfx, const String& str, int32_t x, int32_t y, uint16_t fg_color, uint16_t bg_color, int stroke_extra = 1) {
+    gfx.setTextColor(fg_color, bg_color);
+    for (int dx = -stroke_extra; dx <= stroke_extra; ++dx) {
+        for (int dy = -stroke_extra; dy <= stroke_extra; ++dy) {
+            if (dx == 0 && dy == 0) continue;
+            gfx.drawString(str, x + dx, y + dy);
+        }
+    }
+    gfx.drawString(str, x, y);
+}
+
+void renderStandbyUI(const PrinterState& pState) {
     static int last_weather_temp = -999;
     static int last_weather_humidity = -999;
     static int last_weather_code = -999;
@@ -725,19 +863,16 @@ void renderStandbyUI() {
         lcd.drawLine(275, 290, 275, 445, lcd.color565(32, 45, 68));
         lcd.drawLine(525, 290, 525, 445, lcd.color565(32, 45, 68));
 
-        // Column Titles
-        lcd.setFont(&fonts::efontTW_16);
-        lcd.setTextSize(1);
+        // Column Titles (Enlarged and bold titles with Tracking/Letter-Spacing to prevent crowding)
+        lcd.setFont(&fonts::efontTW_24_b);
+        lcd.setTextSize(1.25);
         lcd.setTextPadding(0);
-        lcd.setTextColor(lcd.color565(140, 165, 195), card_bg);
-        lcd.setCursor(102, 290); // Shifted right by ~0.5cm
-        lcd.print("今日天氣狀況");
-        
-        lcd.setCursor(350, 290);
-        lcd.print("即時環境氣溫");
-
-        lcd.setCursor(600, 290);
-        lcd.print("即時相對濕度");
+        lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
+        drawSpacedStringCenter(lcd, "今日天氣狀況", 150, 298, 6);
+        drawSpacedStringCenter(lcd, "即時環境氣溫", 400, 298, 6);
+        drawSpacedStringCenter(lcd, "即時相對濕度", 650, 298, 6);
+        lcd.setTextSize(1);
+        lcd.setTextDatum(textdatum_t::top_left);
 
         standby_initialized = true;
         last_weather_temp = -999;
@@ -767,16 +902,15 @@ void renderStandbyUI() {
             const char* const wdays[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
             const char* wday_str = wdays[timeinfo->tm_wday % 7];
 
-            lcd.setFont(&fonts::efontTW_16);
-            lcd.setTextSize(2);
+            lcd.setFont(&fonts::efontTW_24_b);
+            lcd.setTextSize(1);
             lcd.setTextPadding(0);
             lcd.setTextColor(lcd.color565(170, 200, 235), lcd.color565(20, 28, 44));
             
-            lcd.setTextDatum(textdatum_t::top_center);
-            lcd.drawString(date_buf, 400, 412);
-            lcd.drawString(wday_str, 650, 412);
+            lcd.setTextDatum(textdatum_t::middle_center);
+            lcd.drawString(date_buf, 400, 428);
+            lcd.drawString(wday_str, 650, 428);
             lcd.setTextDatum(textdatum_t::top_left);
-            lcd.setTextSize(1);
             
             lcd.endWrite();
         }
@@ -790,57 +924,95 @@ void renderStandbyUI() {
             // Left column: weather icon and condition
             lcd.fillRect(26, 315, 246, 140, lcd.color565(20, 28, 44));
             
-            drawWeatherIconLarge(150, 340, last_weather_code);
+            drawWeatherIconLarge(150, 355, last_weather_code);
 
-            lcd.setFont(&fonts::efontTW_16);
-            lcd.setTextSize(2);
+            lcd.setFont(&fonts::efontTW_24_b);
+            lcd.setTextSize(1);
             lcd.setTextPadding(0);
             lcd.setTextColor(TFT_CYAN, lcd.color565(20, 28, 44));
-            lcd.setTextDatum(textdatum_t::top_center);
+            lcd.setTextDatum(textdatum_t::middle_center);
             String weather_str = last_weather_city + " " + weatherService.data.desc_cn;
-            lcd.drawString(weather_str, 150, 412);
+            lcd.drawString(weather_str, 150, 428);
             lcd.setTextDatum(textdatum_t::top_left);
-            lcd.setTextSize(1);
             lcd.endWrite();
         }
 
         if ((int)round(weatherService.data.temp) != last_weather_temp) {
             last_weather_temp = (int)round(weatherService.data.temp);
             lcd.startWrite();
-            // Center column: temperature (Shifted right by ~1cm)
-            lcd.fillRect(285, 320, 230, 80, lcd.color565(20, 28, 44));
-            lcd.setFont(&fonts::Font0);
-            lcd.setTextSize(6);
-            lcd.setTextPadding(0);
-            lcd.setTextColor(lcd.color565(255, 150, 50), lcd.color565(20, 28, 44));
-            lcd.setCursor(368, 335);
-            lcd.printf("%d", last_weather_temp);
+            // Center column: temperature
+            lcd.fillRect(280, 325, 240, 80, lcd.color565(20, 28, 44));
             
-            lcd.setFont(&fonts::efontTW_16);
+            // Extra Large & Heavy Bold Vector Number (FreeSansBold24pt7b @ 1.7x with Multi-pixel Heavy Overdraw)
+            lcd.setFont(&fonts::FreeSansBold24pt7b);
+            lcd.setTextSize(1.7);
+            lcd.setTextPadding(0);
+            lcd.setTextDatum(textdatum_t::middle_right);
+            // 數字往右平移至 432，讓數字主體完美居中於 X=400 欄位中心，筆劃加粗膨脹 (Heavy)
+            drawHeavyString(lcd, String(last_weather_temp), 432, 370, (uint16_t)lcd.color565(255, 155, 45), (uint16_t)lcd.color565(20, 28, 44), 1);
+            
+            // High-Resolution Unit Symbol (°C)
+            lcd.setFont(&fonts::efontTW_24_b);
+            lcd.setTextSize(1.2);
+            lcd.setTextDatum(textdatum_t::middle_left);
+            lcd.setTextColor(lcd.color565(255, 190, 110), lcd.color565(20, 28, 44));
+            lcd.drawString("°C", 440, 365);
             lcd.setTextSize(1);
-            lcd.setCursor(460, 340);
-            lcd.print("°C");
+            lcd.setTextDatum(textdatum_t::top_left);
             lcd.endWrite();
         }
 
         if (weatherService.data.humidity != last_weather_humidity) {
             last_weather_humidity = weatherService.data.humidity;
             lcd.startWrite();
-            // Right column: humidity (Shifted right by ~1cm)
-            lcd.fillRect(535, 320, 230, 80, lcd.color565(20, 28, 44));
-            lcd.setFont(&fonts::Font0);
-            lcd.setTextSize(6);
-            lcd.setTextPadding(0);
-            lcd.setTextColor(lcd.color565(60, 190, 255), lcd.color565(20, 28, 44));
-            lcd.setCursor(618, 335);
-            lcd.printf("%d", last_weather_humidity);
+            // Right column: humidity
+            lcd.fillRect(530, 325, 240, 80, lcd.color565(20, 28, 44));
             
-            lcd.setFont(&fonts::Font0);
-            lcd.setTextSize(3);
-            lcd.setCursor(708, 340);
-            lcd.print("%");
+            // Extra Large & Heavy Vibrant Pink Vector Number (亮麗櫻花粉紅色 - 真正的粉紅！)
+            lcd.setFont(&fonts::FreeSansBold24pt7b);
+            lcd.setTextSize(1.7);
+            lcd.setTextPadding(0);
+            lcd.setTextDatum(textdatum_t::middle_right);
+            // 數字往右平移至 682，讓數字主體完美居中於 X=650 欄位中心，精確傳遞 uint16_t RGB565
+            drawHeavyString(lcd, String(last_weather_humidity), 682, 370, (uint16_t)lcd.color565(255, 90, 160), (uint16_t)lcd.color565(20, 28, 44), 1);
+            
+            // High-Resolution Unit Symbol (%) - 嚴格保持原版經典天空藍色
+            lcd.setFont(&fonts::FreeSansBold18pt7b);
+            lcd.setTextSize(1.1);
+            lcd.setTextDatum(textdatum_t::middle_left);
+            lcd.setTextColor((uint16_t)lcd.color565(60, 190, 255), (uint16_t)lcd.color565(20, 28, 44));
+            lcd.drawString("%", 690, 365);
+            lcd.setTextSize(1);
+            lcd.setTextDatum(textdatum_t::top_left);
             lcd.endWrite();
         }
+    }
+
+    // Bottom Status & Touch Hint Bar (Y = 462~478, perfectly fills bottom space)
+    static String last_bottom_status = "";
+    String bottom_status = "";
+    if (pState.is_connected) {
+        if (pState.gcode_state == "RUNNING" || pState.gcode_state == "PAUSE") {
+            bottom_status = "列印中 " + String(pState.mc_percent) + "%  ·  噴頭 " + String(pState.nozzle_temper) + "°C  ·  輕觸螢幕或按鍵切換儀表板";
+        } else {
+            bottom_status = "印表機待命中  ·  噴頭 " + String(pState.nozzle_temper) + "°C / 熱床 " + String(pState.bed_temper) + "°C  ·  輕觸螢幕或按鍵切換儀表板";
+        }
+    } else {
+        bottom_status = "印表機未連線  ·  輕觸螢幕或按鍵切換儀表板";
+    }
+
+    if (!standby_initialized || bottom_status != last_bottom_status) {
+        last_bottom_status = bottom_status;
+        lcd.startWrite();
+        lcd.fillRect(10, 461, 780, 18, lcd.color565(12, 16, 24));
+        lcd.setFont(&fonts::efontTW_16);
+        lcd.setTextSize(1);
+        lcd.setTextPadding(0);
+        lcd.setTextColor(pState.is_connected ? lcd.color565(110, 150, 190) : lcd.color565(220, 100, 100), lcd.color565(12, 16, 24));
+        lcd.setTextDatum(textdatum_t::middle_center);
+        lcd.drawString(bottom_status, 400, 470);
+        lcd.setTextDatum(textdatum_t::top_left);
+        lcd.endWrite();
     }
 }
 
@@ -862,14 +1034,54 @@ void renderDashboardUI(const PrinterState& pState) {
     static int last_bed_temper = -999;
     static int last_bed_target = -999;
     static int last_chamber_temper = -999;
+    static int last_host_temper = -999;
+    static int last_flow_rate = -999;
     
     // Card 3 cache
     static int last_layer_num = -1;
     static int last_total_layer_num = -1;
+    static float last_filament_used_m = -1.0f;
+    static String last_fil_name = "INIT_UNSET";
+    static int last_speed_pct = -1;
+    static int last_card3_flow = -1;
     static String last_gcode_file = "INIT_UNSET";
     static String last_t_state[4] = {"", "", "", ""};
     static uint32_t last_filament_rgb[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
     static bool last_filament_loaded[4] = {false, false, false, false};
+
+    // Detect printer model switch and reset all caches
+    static String last_rendered_profile = "";
+    if (last_rendered_profile != printer_model) {
+        last_rendered_profile = printer_model;
+        first_run = true;
+        dashboard_initialized = false;
+        last_connected = !pState.is_connected;
+        last_printer_ip = "";
+        last_device_ip = "";
+        last_mc_percent = -1;
+        last_gcode_state = "";
+        last_remaining_time = -999;
+        last_ota_url = "";
+        last_nozzle_temper = -999;
+        last_nozzle_target = -999;
+        last_bed_temper = -999;
+        last_bed_target = -999;
+        last_chamber_temper = -999;
+        last_host_temper = -999;
+        last_flow_rate = -999;
+        last_layer_num = -1;
+        last_total_layer_num = -1;
+        last_filament_used_m = -1.0f;
+        last_fil_name = "RESET";
+        last_speed_pct = -1;
+        last_card3_flow = -1;
+        last_gcode_file = "RESET";
+        for (int i = 0; i < 4; i++) {
+            last_t_state[i] = "RESET";
+            last_filament_rgb[i] = 0;
+            last_filament_loaded[i] = false;
+        }
+    }
 
     if (in_screensaver) {
         // 1. Render Virtual Matrix (Static 24h Clock)
@@ -878,7 +1090,7 @@ void renderDashboardUI(const PrinterState& pState) {
         lcd.endWrite();
 
         // 2. Render Full High-Def Weather & Humidity Dashboard underneath
-        renderStandbyUI();
+        renderStandbyUI(pState);
         return;
     }
 
@@ -952,15 +1164,6 @@ void renderDashboardUI(const PrinterState& pState) {
     }
 
     // CARD 1: Progress & Status
-    if (first_run) {
-        lcd.setFont(&fonts::efontTW_24_b);
-        lcd.setTextSize(1);
-        lcd.setTextPadding(0);
-        lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
-        lcd.setCursor(28, cardY + 10);
-        lcd.print("列印進度");
-    }
-
     // Row 1: Print Progress Percentage (Right-aligned, vivid yellow)
     if (first_run || pState.mc_percent != last_mc_percent) {
         last_mc_percent = pState.mc_percent;
@@ -1061,8 +1264,19 @@ void renderDashboardUI(const PrinterState& pState) {
         lcd.printf("%d / %d °C", last_bed_temper, last_bed_target);
     }
 
-    if (first_run || pState.chamber_temper != last_chamber_temper || (printer_model == "ideaformer_ir3" && pState.host_temper != last_chamber_temper)) {
-        last_chamber_temper = (printer_model == "ideaformer_ir3" && pState.chamber_temper <= 0) ? pState.host_temper : pState.chamber_temper;
+    // Card 2 Row 3: Isolated Chamber vs Host/Flow
+    bool card2_row3_changed = false;
+    if (printer_model == "ideaformer_ir3") {
+        int cur_flow = (int)round(pState.extrude_factor * 100.0f);
+        card2_row3_changed = (pState.host_temper != last_host_temper || cur_flow != last_flow_rate);
+    } else {
+        card2_row3_changed = (pState.chamber_temper != last_chamber_temper);
+    }
+
+    if (first_run || card2_row3_changed) {
+        last_chamber_temper = pState.chamber_temper;
+        last_host_temper = pState.host_temper;
+        last_flow_rate = (int)round(pState.extrude_factor * 100.0f);
         lcd.fillRect(280, cardY + 120, 225, 30, card_bg);
         lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
@@ -1077,7 +1291,7 @@ void renderDashboardUI(const PrinterState& pState) {
             } else {
                 lcd.print("流量: ");
                 lcd.setTextColor(lcd.color565(140, 230, 160), card_bg);
-                lcd.printf("%d%%", (int)round(pState.extrude_factor * 100.0f));
+                lcd.printf("%d%%", last_flow_rate);
             }
         } else {
             lcd.print("機箱: ");
@@ -1086,19 +1300,43 @@ void renderDashboardUI(const PrinterState& pState) {
         }
     }
 
-    // CARD 3: Layers & Extruders
-    if (first_run || pState.layer_num != last_layer_num || pState.total_layer_num != last_total_layer_num) {
+    // CARD 3: Layers & Extruders (Isolated for Ideaformer IR3 Belt Printer)
+    bool card3_row1_changed = false;
+    if (printer_model == "ideaformer_ir3") {
+        if (pState.total_layer_num > 0) {
+            card3_row1_changed = (pState.layer_num != last_layer_num || pState.total_layer_num != last_total_layer_num);
+        } else {
+            card3_row1_changed = (pState.filament_used_m != last_filament_used_m);
+        }
+    } else {
+        card3_row1_changed = (pState.layer_num != last_layer_num || pState.total_layer_num != last_total_layer_num);
+    }
+
+    if (first_run || card3_row1_changed) {
         last_layer_num = pState.layer_num;
         last_total_layer_num = pState.total_layer_num;
+        last_filament_used_m = pState.filament_used_m;
         lcd.fillRect(535, cardY + 46, 240, 30, card_bg);
         lcd.setFont(&fonts::efontTW_24_b);
         lcd.setTextSize(1);
         lcd.setTextPadding(0);
         lcd.setCursor(540, cardY + 48);
         lcd.setTextColor(lcd.color565(148, 163, 184), card_bg);
-        lcd.print("層數: ");
-        lcd.setTextColor(lcd.color565(250, 204, 21), card_bg);
-        lcd.printf("%d / %d", last_layer_num, last_total_layer_num);
+        if (printer_model == "ideaformer_ir3") {
+            if (last_total_layer_num > 0) {
+                lcd.print("層數: ");
+                lcd.setTextColor(lcd.color565(250, 204, 21), card_bg);
+                lcd.printf("%d / %d", last_layer_num, last_total_layer_num);
+            } else {
+                lcd.print("耗材: ");
+                lcd.setTextColor(lcd.color565(250, 204, 21), card_bg);
+                lcd.printf("%.1f m", last_filament_used_m);
+            }
+        } else {
+            lcd.print("層數: ");
+            lcd.setTextColor(lcd.color565(250, 204, 21), card_bg);
+            lcd.printf("%d / %d", last_layer_num, last_total_layer_num);
+        }
     }
 
     if (first_run || pState.gcode_file != last_gcode_file) {
@@ -1119,20 +1357,15 @@ void renderDashboardUI(const PrinterState& pState) {
 
     // Bottom of Card 3: Filament / Machine specific details
     if (printer_model == "ideaformer_ir3") {
-        static float last_filament_used_m = -1.0f;
-        static String last_fil_name = "UNSET";
-        static int last_speed_pct = -1;
-        static int last_flow_pct = -1;
-
         int cur_speed_pct = (int)round(pState.speed_factor * 100.0f);
         int cur_flow_pct = (int)round(pState.extrude_factor * 100.0f);
 
         if (first_run || pState.filament_used_m != last_filament_used_m || pState.filament_name != last_fil_name ||
-            cur_speed_pct != last_speed_pct || cur_flow_pct != last_flow_pct) {
+            cur_speed_pct != last_speed_pct || cur_flow_pct != last_card3_flow) {
             last_filament_used_m = pState.filament_used_m;
             last_fil_name = pState.filament_name;
             last_speed_pct = cur_speed_pct;
-            last_flow_pct = cur_flow_pct;
+            last_card3_flow = cur_flow_pct;
 
             lcd.fillRect(535, cardY + 115, 240, 55, card_bg);
             lcd.setFont(&fonts::efontTW_16);
@@ -1142,14 +1375,14 @@ void renderDashboardUI(const PrinterState& pState) {
             // Row 1: Filament Name & Usage
             lcd.setCursor(542, cardY + 120);
             lcd.setTextColor(lcd.color565(180, 160, 255), card_bg);
-            String fName = (last_fil_name.length() > 0) ? last_fil_name : "通用耗材";
+            String fName = (last_fil_name.length() > 0 && last_fil_name != "RESET") ? last_fil_name : "通用耗材";
             if (fName.length() > 12) fName = fName.substring(0, 11) + "..";
             lcd.printf("[%s] %.1fm", fName.c_str(), last_filament_used_m);
 
             // Row 2: Speed & Flow rates
             lcd.setCursor(542, cardY + 146);
             lcd.setTextColor(lcd.color565(56, 189, 248), card_bg);
-            lcd.printf("速度: %d%% | 流量: %d%%", last_speed_pct, last_flow_pct);
+            lcd.printf("速度: %d%% | 流量: %d%%", last_speed_pct, last_card3_flow);
         }
     } else {
         // Standard Snapmaker U1: 4 Slots Indicators (T1 ~ T4 Real Filament Colors - Enlarged Display)
@@ -1215,6 +1448,9 @@ void setup() {
     // Stable Wi-Fi Tx Power
     WiFi.setTxPower(WIFI_POWER_15dBm);
 
+    // Initialize Hardware Button (GPIO 0 / BOOT Button for Non-Touch CYD boards)
+    pinMode(0, INPUT_PULLUP);
+
     // Initialize LCD
     lcd.init();
     lcd.setRotation(0);
@@ -1227,7 +1463,7 @@ void setup() {
     // 原生高品質粗體標題 (36px)
     lcd.setTextSize(1.5);
     lcd.setTextColor(TFT_CYAN);
-    lcd.drawString("SnapMatrix CYD-7 智慧面板 v1.1", 400, 180);
+    lcd.drawString("SnapMatrix 智慧面板 v1.3", 400, 180);
 
     // 原生高品質粗體連線中提示 (29px)
     lcd.setTextSize(1.2);
@@ -1281,7 +1517,7 @@ void setup() {
         // 標題加大 (原生 24px 粗體 x 1.8 = ~44px 超大粗體)
         lcd.setTextSize(1.8);
         lcd.setTextColor(TFT_CYAN);
-        lcd.drawString("SnapMatrix 初始配網模式 v1.1", 400, 80);
+        lcd.drawString("SnapMatrix 初始配網模式 v1.3", 400, 80);
         
         // 原生 24px 粗體各項指示
         lcd.setTextSize(1.0);
@@ -1360,7 +1596,7 @@ void setup() {
         }
 
         String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                      "<title>SnapMatrix CYD-7 控制面板 v1.1</title><style>"
+                      "<title>SnapMatrix 控制面板 v1.3</title><style>"
                       "body{font-family:-apple-system,BlinkMacSystemFont,'Noto Sans TC','PingFang TC','Microsoft JhengHei','Segoe UI',sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box;-webkit-font-smoothing:antialiased;}"
                       ".card{background:rgba(30,41,59,0.85);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.15);padding:36px;border-radius:24px;width:100%;max-width:540px;box-shadow:0 24px 48px rgba(0,0,0,0.5);}"
                       "h2{margin-top:0;color:#38bdf8;font-size:28px;font-weight:800;display:flex;align-items:center;gap:12px;margin-bottom:24px;letter-spacing:0.5px;}"
@@ -1374,10 +1610,10 @@ void setup() {
                       ".status{font-size:17px;font-weight:600;line-height:1.6;color:#10b981;margin-bottom:26px;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.25);padding:14px 18px;border-radius:12px;display:flex;flex-direction:column;gap:8px;}"
                       ".status-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;}"
                       "</style></head><body><div class='card'>"
-                      "<h2>SnapMatrix 控制面板 <span style='font-size:15px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;padding:3px 10px;border-radius:20px;font-weight:700;margin-left:auto;'>v1.1 正式版</span></h2>"
+                      "<h2>SnapMatrix 控制面板 <span style='font-size:15px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.3);color:#38bdf8;padding:3px 10px;border-radius:20px;font-weight:700;margin-left:auto;'>v1.3 正式版</span></h2>"
                       "<div class='status'>"
                       "<div class='status-row'><span>裝置 IP: " + WiFi.localIP().toString() + "</span><span id='conn-status'>狀態: " + (pState.is_connected ? "已連線" : "未連線") + "</span></div>"
-                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.1</span></div>"
+                      "<div class='status-row'><span style='color:#94a3b8;'>韌體版本:</span><span style='font-weight:600;color:#38bdf8;'>v1.3</span></div>"
                       "<div class='status-row'><span style='color:#a78bfa;'>🖨️ 印表機 ROM:</span><span id='rom-text' style='font-weight:600;color:#fff;'>" + rom_info + "</span></div>"
                       "<div class='status-row'><span style='color:#38bdf8;'>⛅ 當前天氣:</span><span>" + weather_status + "</span></div>"
                       "</div>"
@@ -1444,6 +1680,12 @@ void setup() {
         server.send(303);
     });
 
+    server.on("/reboot", HTTP_GET, []() {
+        server.send(200, "text/plain", "Rebooting...");
+        delay(500);
+        ESP.restart();
+    });
+
     ElegantOTA.begin(&server);
     ElegantOTA.setAutoReboot(true);
     ElegantOTA.onStart([]() {
@@ -1494,15 +1736,20 @@ void loop() {
         PrinterState pState;
         moonraker.getState(pState);
 
-        // Touch Input Handling (Toggle between Working Dashboard & Standby Screensaver)
-        static unsigned long last_touch_time = 0;
-        static bool was_touched = false;
-        uint16_t touch_x, touch_y;
+        // Touch & Hardware Button Input Handling (Toggle between Working Dashboard & Standby Screensaver)
+        // Supports both Touchscreens and Non-Touch CYD boards via GPIO 0 (BOOT button)
+        static unsigned long last_input_time = 0;
+        static bool was_active = false;
+        uint16_t touch_x = 0, touch_y = 0;
         bool is_touched = lcd.getTouch(&touch_x, &touch_y);
+        bool is_btn_pressed = (digitalRead(0) == LOW);
+        bool is_active = (is_touched || is_btn_pressed);
 
-        if (is_touched && !was_touched && (millis() - last_touch_time >= 400)) {
-            last_touch_time = millis();
-            was_touched = true;
+        if (is_active && !was_active && (millis() - last_input_time >= 350)) {
+            last_input_time = millis();
+            was_active = true;
+
+            const char* trigger_source = is_btn_pressed ? "GPIO 0 (BOOT 按鍵)" : "觸控螢幕";
 
             if (in_screensaver || manual_sleep) {
                 // Wake Up -> Working Mode
@@ -1516,7 +1763,7 @@ void loop() {
                     current_lcd_brightness = BRIGHTNESS_NORMAL;
                     lcd.setBrightness(current_lcd_brightness);
                 }
-                Serial.printf("[Touch] 觸控喚醒 -> 恢復工作狀態與 100%% 亮度 (X:%d, Y:%d)\n", touch_x, touch_y);
+                Serial.printf("[Input] %s 喚醒 -> 恢復工作狀態與 100%% 亮度\n", trigger_source);
             } else {
                 // Sleep -> Standby / Screensaver Mode
                 manual_sleep = true;
@@ -1525,10 +1772,10 @@ void loop() {
                 idle_start = 0;
                 dashboard_initialized = false;
                 standby_initialized = false;
-                Serial.printf("[Touch] 觸控休眠 -> 切換至待機狀態 (X:%d, Y:%d)\n", touch_x, touch_y);
+                Serial.printf("[Input] %s 休眠 -> 切換至待機狀態\n", trigger_source);
             }
-        } else if (!is_touched) {
-            was_touched = false;
+        } else if (!is_active) {
+            was_active = false;
         }
 
         // Update virtual LED matrix content
